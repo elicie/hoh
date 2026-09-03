@@ -42,14 +42,20 @@ test("codex adapter uses the isolated non-interactive contract and maps schema o
           description: "fixture",
           parameters: Type.Object({
             ok: Type.Boolean(),
-            detail: Type.Object({ required: Type.String(), optional: Type.Optional(Type.String()) }),
+            detail: Type.Object({
+              required: Type.String({ minLength: 1, pattern: "^fixture" }),
+              optional: Type.Optional(Type.String()),
+              tags: Type.Array(Type.String(), { minItems: 1, maxItems: 2, uniqueItems: true }),
+            }),
           }),
         },
       ],
       model: "codex/gpt-fixture:high",
       onTranscript: (chunk) => transcript.push(chunk),
     });
-    assert.deepEqual(result.submissions.submit_fixture, [{ ok: true, detail: { required: "fixture-value" } }]);
+    assert.deepEqual(result.submissions.submit_fixture, [
+      { ok: true, detail: { required: "fixture-value", tags: ["fixture-value"] } },
+    ]);
     assert.deepEqual(result.usage, { input: 120, output: 30, cacheRead: 20, cacheWrite: 0, totalTokens: 150, cost: 0 });
     assert.equal(result.turns, 1);
     assert.equal(result.model, "codex/gpt-fixture:high");
@@ -64,8 +70,13 @@ test("codex adapter uses the isolated non-interactive contract and maps schema o
     assert.equal(invocation.outputSchema.additionalProperties, false);
     assert.deepEqual(invocation.outputSchema.required, ["ok", "detail"]);
     assert.equal(invocation.outputSchema.properties.detail.additionalProperties, false);
-    assert.deepEqual(invocation.outputSchema.properties.detail.required, ["required", "optional"]);
+    assert.deepEqual(invocation.outputSchema.properties.detail.required, ["required", "optional", "tags"]);
     assert.ok(invocation.outputSchema.properties.detail.properties.optional.anyOf.some((candidate: { type?: string }) => candidate.type === "null"));
+    assert.doesNotMatch(JSON.stringify(invocation.outputSchema), /"uniqueItems"/);
+    assert.equal(invocation.outputSchema.properties.detail.properties.required.minLength, 1);
+    assert.equal(invocation.outputSchema.properties.detail.properties.required.pattern, "^fixture");
+    assert.equal(invocation.outputSchema.properties.detail.properties.tags.minItems, 1);
+    assert.equal(invocation.outputSchema.properties.detail.properties.tags.maxItems, 2);
     assert.match(transcript.join(""), /"adapter":"codex"/);
     assert.match(transcript.join(""), /"type":"turn.completed"/);
   } finally {

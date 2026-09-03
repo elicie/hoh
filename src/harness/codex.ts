@@ -8,6 +8,7 @@ import type { Harness, HarnessRolePolicy, RoleInvocation, RoleResult } from "./t
 import { CODING_TOOLS, emptyUsage, INSPECT_TOOLS, READ_ONLY_TOOLS } from "./types.js";
 
 const THINKING_LEVELS = new Set(["minimal", "low", "medium", "high", "xhigh"]);
+const CODEX_UNSUPPORTED_SCHEMA_KEYWORDS = new Set(["uniqueItems"]);
 const MAX_ERROR_TEXT = 8_000;
 const MAX_PROCESS_OUTPUT_BYTES = 16 * 1024 * 1024;
 
@@ -160,7 +161,9 @@ function toCodexOutputSchema(value: unknown): unknown {
   if (!isRecord(value)) return value;
 
   const converted = Object.fromEntries(
-    Object.entries(value).map(([key, child]) => [key, toCodexOutputSchema(child)]),
+    Object.entries(value)
+      .filter(([key]) => !CODEX_UNSUPPORTED_SCHEMA_KEYWORDS.has(key))
+      .map(([key, child]) => [key, toCodexOutputSchema(child)]),
   ) as Record<string, unknown>;
   if (converted.type !== "object" && !isRecord(converted.properties)) return converted;
 
