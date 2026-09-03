@@ -3,10 +3,11 @@
  * `prompts/` plus runtime slots rendered here. The development document D_t
  * is a deterministic scaffold with the planner's overlay inserted.
  */
+import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import type { CheckResult, ClaimCatalog, CoverageState, EvidenceBundle, Ledger, PlannerOverlay, Role } from "../types.js";
+import { ROLES, type CheckResult, type ClaimCatalog, type CoverageState, type EvidenceBundle, type Ledger, type PlannerOverlay, type Role } from "../types.js";
 import { renderChecks } from "./checks.js";
 import { renderCoverageTable } from "./coverage.js";
 import { openIssues, renderLedger } from "./ledger.js";
@@ -21,6 +22,17 @@ async function template(name: string): Promise<string> {
     cache.set(name, t);
   }
   return t;
+}
+
+export async function rolePromptTemplateHashes(): Promise<Record<Role, { system: string; user: string }>> {
+  const entries = await Promise.all(
+    ROLES.map(async (role) => {
+      const [system, user] = await Promise.all([template(`${role}.system`), template(`${role}.user`)]);
+      const digest = (value: string) => createHash("sha256").update(value).digest("hex");
+      return [role, { system: digest(system), user: digest(user) }] as const;
+    }),
+  );
+  return Object.fromEntries(entries) as Record<Role, { system: string; user: string }>;
 }
 
 export function render(tpl: string, slots: Record<string, string | number | null | undefined>): string {

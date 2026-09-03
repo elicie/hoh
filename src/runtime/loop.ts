@@ -55,6 +55,7 @@ import {
 } from "./git.js";
 import { applyEvidence, emptyLedger } from "./ledger.js";
 import { renderDevelopmentDocument, renderDeveloperPrompts, renderPlannerPrompts, renderTesterPrompts } from "./prompts.js";
+import { assertProtocolReceiptIntegrity, buildProtocolReceipt, hasExplicitProtocol } from "./protocol.js";
 import { renderRunReadme, renderTesterReport } from "./report.js";
 import { plannerTools, SUBMIT_EVIDENCE_TOOL, SUBMIT_PLAN_TOOL, testerTools } from "./schemas.js";
 import { lastCompletedLoop, loadLedger, loadRun, pad, readJson, RunPaths, writeJson, writeText } from "./state.js";
@@ -108,9 +109,10 @@ export async function runHoh(opts: RunOptions): Promise<RunResult> {
   await ensureRepo(ws);
 
   // Effective config: stored run config (if any) <- overrides.
-  const stored = await readJson<HohConfig>(paths.config);
+  const stored = await readJson<ConfigPatch>(paths.config);
   const base = stored ? mergeConfig(DEFAULT_CONFIG, stored) : DEFAULT_CONFIG;
   const config = mergeConfig(base, opts.config);
+  const protocolImplicit = !hasExplicitProtocol(stored) && !hasExplicitProtocol(opts.config);
   const configSource = opts.configSource ?? (stored ? paths.rel(paths.config) : "built-in defaults");
   if (opts.harness.name !== config.harness) {
     throw new Error(`configured harness is "${config.harness}" but a "${opts.harness.name}" harness was supplied`);
@@ -121,6 +123,7 @@ export async function runHoh(opts: RunOptions): Promise<RunResult> {
   let initialized = false;
   if (!run) {
     if (!opts.specPath) throw new Error("A specification file (--spec) is required to start a new run.");
+    const protocolReceipt = await buildProtocolReceipt(config, opts.harness, { legacyDefault: protocolImplicit, origin: "run_start" });
     run = {
       schema_version: 1,
       run_id: `${new Date().toISOString().slice(0, 10).replace(/-/g, "")}-${randomBytes(3).toString("hex")}`,
@@ -128,6 +131,7 @@ export async function runHoh(opts: RunOptions): Promise<RunResult> {
       created_at: new Date().toISOString(),
       config,
       config_source: configSource,
+      protocol_receipt: protocolReceipt,
     };
     await mkdir(paths.root, { recursive: true });
     await copyFile(path.resolve(opts.specPath), paths.spec);
@@ -136,9 +140,45 @@ export async function runHoh(opts: RunOptions): Promise<RunResult> {
     await writeJson(paths.ledger, emptyLedger());
     initialized = true;
   } else {
+    let protocolReceipt = run.protocol_receipt;
+    if (protocolReceipt) {
+      assertProtocolReceiptIntegrity(protocolReceipt);
+    } else {
+      const recordedLegacy = !hasExplicitProtocol(run.config);
+      const recordedConfig = mergeConfig(DEFAULT_CONFIG, run.config as ConfigPatch);
+      if (recordedConfig.protocol === "paper") {
+        throw new Error(`cannot resume paper run ${run.run_id}: its run-start protocol receipt is missing`);
+      }
+      if (recordedConfig.protocol !== config.protocol) {
+        throw new Error(
+          `cannot change run protocol from ${recordedConfig.protocol} to ${config.protocol}; start a new run in another workspace`,
+        );
+      }
+      protocolReceipt = await buildProtocolReceipt(config, opts.harness, {
+        legacyDefault: recordedLegacy,
+        origin: "legacy_reconstruction",
+      });
+    }
+    if (protocolReceipt.mode !== config.protocol) {
+      throw new Error(
+        `cannot change run protocol from ${protocolReceipt.mode} to ${config.protocol}; start a new run in another workspace`,
+      );
+    }
+    if (protocolReceipt.mode === "paper") {
+      const requestedReceipt = await buildProtocolReceipt(config, opts.harness, {
+        legacyDefault: protocolReceipt.legacy_default,
+        origin: protocolReceipt.origin,
+      });
+      if (requestedReceipt.protocol_sha256 !== protocolReceipt.protocol_sha256) {
+        throw new Error(
+          `cannot resume paper run ${run.run_id}: protocol contract changed (${protocolReceipt.protocol_sha256.slice(0, 12)} -> ${requestedReceipt.protocol_sha256.slice(0, 12)}); start a new run in another workspace`,
+        );
+      }
+    }
     const changed = JSON.stringify(run.config) !== JSON.stringify(config);
     run.config = config;
     run.config_source = configSource;
+    run.protocol_receipt = protocolReceipt;
     await writeJson(paths.config, config);
     await writeJson(paths.runJson, run);
     if (changed) {
@@ -154,6 +194,7 @@ export async function runHoh(opts: RunOptions): Promise<RunResult> {
     harness: opts.harness,
     paths,
     model: modelForRole(config, "planner"),
+    expectedModel: run.protocol_receipt?.mode === "paper" ? run.protocol_receipt.models.planner ?? undefined : undefined,
     timeoutMs: config.timeouts.role_min * 60_000,
   });
   await writeText(paths.readme, await renderRunReadme(paths, run, await loadLedger(paths)));
@@ -164,7 +205,7 @@ export async function runHoh(opts: RunOptions): Promise<RunResult> {
     log(`generated ${claimState.catalog.claims.length} fixed PRD claim(s)`);
   }
   log(
-    `models: ${(["planner", "developer", "tester"] as const).map((r) => `${r}=${modelForRole(config, r) ?? "(harness default)"}`).join(", ")}; budget ${config.loops} loops`,
+    `protocol: ${run.protocol_receipt?.mode ?? config.protocol}${run.protocol_receipt?.legacy_default ? " (legacy default)" : ""} ${run.protocol_receipt?.protocol_sha256.slice(0, 12) ?? "unrecorded"}; models: ${(["planner", "developer", "tester"] as const).map((r) => `${r}=${modelForRole(config, r) ?? "(harness default)"}`).join(", ")}; budget ${config.loops} loops`,
   );
 
   // Runtime-owned records regenerated at start-up (provider file, run/config) are committed by the runtime,
@@ -553,6 +594,14 @@ async function invokeRole(ctx: Ctx, inv: RoleInvocation, requiredTool?: string):
         ? inv.prompt
         : `${inv.prompt}\n\n## Runtime notice\n\nYour previous attempt ended without calling \`${requiredTool}\`. The runtime only accepts output delivered through that tool. Redo the work as needed and call \`${requiredTool}\` exactly once before finishing.`;
     result = await ctx.harness.invoke({ ...inv, prompt });
+    if (ctx.run.protocol_receipt?.mode === "paper") {
+      const expected = ctx.run.protocol_receipt.models[inv.role];
+      if (!expected || result.model !== expected) {
+        throw new Error(
+          `paper protocol model mismatch for ${inv.role}: expected ${expected ?? "(none)"}, harness reported ${result.model ?? "(none)"}`,
+        );
+      }
+    }
     for (const k of ["input", "output", "cacheRead", "cacheWrite", "totalTokens", "cost"] as const) total[k] += result.usage[k] ?? 0;
     total.turns += result.turns;
     if (result.model) total.model = result.model;

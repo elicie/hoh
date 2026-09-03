@@ -20,9 +20,14 @@ export type MockScript = (inv: RoleInvocation, api: MockApi) => Promise<string |
 
 export class MockHarness implements Harness {
   readonly name = "mock";
+  readonly version = "builtin-1";
   readonly calls: { role: Role; loopIndex: number; prompt: string; model?: string }[] = [];
 
   constructor(private readonly scripts: Partial<Record<Role, MockScript>>) {}
+
+  async resolveModel(pattern?: string): Promise<string | null> {
+    return pattern ? `mock:${pattern}` : "mock";
+  }
 
   async invoke(inv: RoleInvocation): Promise<RoleResult> {
     this.calls.push({ role: inv.role, loopIndex: inv.loopIndex, prompt: inv.prompt, model: inv.model });

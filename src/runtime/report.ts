@@ -57,10 +57,16 @@ export async function renderRunReadme(paths: RunPaths, run: RunConfig, ledger: L
     .map((r) => `${r}=${models[r] ?? models.default ?? "(harness default)"}`)
     .join(", ");
   lines.push(`**Run:** \`${run.run_id}\`  `);
+  lines.push(
+    `**Protocol:** ${(run.protocol_receipt?.mode ?? run.config.protocol ?? "extended").toUpperCase()}${run.protocol_receipt?.legacy_default ? " (legacy default)" : ""}${run.protocol_receipt?.origin === "legacy_reconstruction" ? " (receipt reconstructed)" : ""}${run.protocol_receipt ? ` — \`${run.protocol_receipt.protocol_sha256}\`` : " (receipt unavailable)"}  `,
+  );
   lines.push(`**Harness:** ${run.config.harness}  `);
   lines.push(`**Models:** ${modelLine}  `);
   lines.push(`**Workflow:** Project Planner → Developer → QA Tester  `);
   lines.push(`**Iteration budget:** ${run.config.loops}  `);
+  if (run.protocol_receipt && run.protocol_receipt.initial_loops !== run.config.loops) {
+    lines.push(`**Initial iteration budget:** ${run.protocol_receipt.initial_loops}  `);
+  }
   lines.push(`**Config:** \`.hoh/config.json\` (from ${run.config_source})`, "");
   lines.push("---", "", "## Persistent issue ledger", "");
   lines.push("| Field | Value |", "| --- | --- |");

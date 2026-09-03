@@ -14,6 +14,8 @@ export interface ClaimGenerationOptions {
   harness: Harness;
   paths: RunPaths;
   model?: string;
+  /** Concrete model identity required by a paper run's start receipt. */
+  expectedModel?: string;
   timeoutMs?: number;
 }
 
@@ -43,6 +45,11 @@ export async function generateClaimCatalog(options: ClaimGenerationOptions): Pro
       timeoutMs: options.timeoutMs,
       model: options.model,
     });
+    if (options.expectedModel && result.model !== options.expectedModel) {
+      throw new Error(
+        `paper protocol model mismatch for planner claim initialization: expected ${options.expectedModel}, harness reported ${result.model ?? "(none)"}`,
+      );
+    }
     const payload = lastSubmission(result.submissions[SUBMIT_CLAIMS_TOOL]) ?? parseJsonBlock(result.finalText);
     try {
       const claims = payload && typeof payload === "object" ? (payload as any).claims : null;

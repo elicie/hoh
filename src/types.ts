@@ -234,6 +234,30 @@ export interface RoleUsage extends UsageTotals {
   model?: string;
 }
 
+export interface RoleContractReceipt {
+  workspace: "active-read-only" | "active-writer" | "isolated-read-only";
+  builtin_tools: string[];
+  structured_tools: string[];
+  system_prompt_sha256: string;
+  user_prompt_sha256: string;
+  output_contract_sha256: string;
+}
+
+/** Contract snapshot; paper runs enforce the run-start snapshot on resume. */
+export interface ProtocolReceipt {
+  schema_version: 1;
+  origin: "run_start" | "legacy_reconstruction";
+  mode: import("./runtime/config.js").ExecutionProtocol;
+  legacy_default: boolean;
+  initial_loops: number;
+  runtime_version: string;
+  harness: { name: string; version: string };
+  models: Record<Role, string | null>;
+  config_sha256: string;
+  role_contracts: Record<Role, RoleContractReceipt>;
+  protocol_sha256: string;
+}
+
 export interface RunConfig {
   schema_version: 1;
   run_id: string;
@@ -243,4 +267,6 @@ export interface RunConfig {
   /** effective configuration for the most recent invocation (also stored in .hoh/config.json) */
   config: import("./runtime/config.js").HohConfig;
   config_source: string;
+  /** Optional only while loading runs created before protocol receipts existed. */
+  protocol_receipt?: ProtocolReceipt;
 }

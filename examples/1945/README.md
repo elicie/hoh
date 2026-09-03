@@ -7,8 +7,9 @@ the generated game, `.hoh/` state, credentials, and execution output.
 ## Contents
 
 - `PRD.md`: the original product requirements and QA contract.
-- `hoh.config.json`: a credential-safe configuration template with separate
-  model slots for development and independent QA.
+- `hoh.config.json`: a credential-safe `extended` configuration template with
+  separate model slots for development and QA. This model split is a local
+  extension, not the paper protocol's source of QA independence.
 - `.gitignore`: excludes local credentials, installed dependencies, and loose
   screenshots. The PRD requires the game itself to remain one HTML file.
 - `tools/`: the syntax checker and headless-Chrome playtest driver used by the
@@ -23,8 +24,9 @@ checkout of the matching HoH revision, and a starting `game/index.html`.
    game file.
 2. Replace `DEVELOPER_MODEL_ID` and `INDEPENDENT_TESTER_MODEL_ID` in
    `hoh.config.json` with model IDs exposed by your OpenAI-compatible gateway.
-   Adjust their context, output, and reasoning metadata to match that gateway,
-   and keep the Tester independent from the Developer when possible.
+   Adjust their context, output, and reasoning metadata to match that gateway.
+   QA remains operationally independent through its separate invocation,
+   frozen candidate, and read-only contract even if both slots use one model.
 3. Export `GATEWAY_BASE_URL` and `GATEWAY_API_KEY`. Do not put credentials in
    the committed config. If Chrome is not at `/usr/bin/google-chrome`, export
    `CHROME_PATH` too.

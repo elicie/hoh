@@ -1,4 +1,5 @@
 {
+  "protocol": "paper",
   "harness": "pi",
   "providers": {
     "spbros": {

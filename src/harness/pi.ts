@@ -9,6 +9,7 @@
  */
 import fs from "node:fs";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import {
   createAgentSession,
   type CreateAgentSessionOptions,
@@ -39,8 +40,19 @@ export interface PiHarnessOptions {
 
 const MAX_STRING = 20_000;
 
+function piPackageVersion(): string {
+  try {
+    const entry = fileURLToPath(import.meta.resolve("@earendil-works/pi-coding-agent"));
+    const manifest = JSON.parse(fs.readFileSync(path.resolve(path.dirname(entry), "..", "package.json"), "utf8")) as { version?: unknown };
+    return typeof manifest.version === "string" && manifest.version ? manifest.version : "unknown";
+  } catch {
+    return "unknown";
+  }
+}
+
 export class PiHarness implements Harness {
   readonly name = "pi";
+  readonly version = piPackageVersion();
   private runtime?: Promise<ModelRuntime>;
 
   constructor(private readonly opts: PiHarnessOptions = {}) {}
@@ -50,6 +62,13 @@ export class PiHarness implements Harness {
       this.runtime = this.opts.modelRuntime ? Promise.resolve(this.opts.modelRuntime) : ModelRuntime.create(this.opts.modelRuntimeOptions);
     }
     return this.runtime;
+  }
+
+  async resolveModel(pattern?: string): Promise<string | null> {
+    if (!pattern) return null;
+    const resolved = resolveCliModel({ cliModel: pattern, modelRuntime: await this.getRuntime() });
+    if (resolved.error || !resolved.model) throw new Error(`pi: cannot resolve model "${pattern}": ${resolved.error ?? "not found"}`);
+    return `${resolved.model.provider}/${resolved.model.id}${resolved.thinkingLevel && resolved.thinkingLevel !== "off" ? `:${resolved.thinkingLevel}` : ""}`;
   }
 
   async invoke(inv: RoleInvocation): Promise<RoleResult> {

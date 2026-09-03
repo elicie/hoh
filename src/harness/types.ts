@@ -50,6 +50,10 @@ export interface RoleResult {
 
 export interface Harness {
   readonly name: string;
+  /** Adapter/package version recorded in the immutable protocol receipt. */
+  readonly version?: string;
+  /** Resolve a configured pattern to the concrete model/reasoning identity used by this adapter. */
+  resolveModel?(pattern?: string): Promise<string | null>;
   invoke(inv: RoleInvocation): Promise<RoleResult>;
 }
 

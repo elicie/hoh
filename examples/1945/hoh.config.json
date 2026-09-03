@@ -1,4 +1,5 @@
 {
+  "protocol": "extended",
   "harness": "pi",
   "providers": {
     "gateway": {

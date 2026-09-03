@@ -34,7 +34,7 @@
 
 ## 현재 판단
 
-현재 런타임은 세 역할의 분리 호출, 이전 후보 warm-start, QA용 동결 worktree, 구조화된 증거, 반복 원장, Git 이력, 재개를 이미 갖췄다. 즉 최소 HoH 루프는 작동한다. 다음 핵심 작업은 이미 끝난 기능을 다시 만드는 것이 아니라, **논문 모드의 고정 실행 계약을 명시적으로 강제하고 QA가 변경 후보를 더 정확히 검사하도록 만드는 것**이다.
+현재 런타임은 세 역할의 분리 호출, 이전 후보 warm-start, QA용 동결 worktree, 구조화된 증거, 반복 원장, Git 이력, 재개와 논문 실행 계약 고정을 갖췄다. 즉 최소 HoH 루프와 paper/extended 실행 구분이 작동한다. 다음 핵심 작업은 **QA에 실제 후보 diff를 제공하고, 반복 gap을 에스컬레이션하며, 역할별 컨텍스트를 점진적으로 노출하는 것**이다.
 
 ## 우선순위 요약
 
@@ -43,7 +43,7 @@
 | 1 | 실행 증거 등급 강제 | Core | 완료 | 유지 | – | – |
 | 2 | PRD 커버리지 카탈로그 | Extension | 완료 | 유지 | – | 1 |
 | 3 | 증거 파일 보존과 해시 | Core | 완료 | 유지 | – | – |
-| 4 | 논문 실행 계약 고정 | Core | 부분 완료 | P0 | 0.5일 | – |
+| 4 | 논문 실행 계약 고정 | Core | 완료 | 유지 | – | – |
 | 5 | 저장소·CI·문서 기준선 | Ops | 완료 | 유지 | – | – |
 | 6 | QA에 후보 diff 제공 | Core | 대기 | P1 | 0.25일 | – |
 | 7 | 장기 실행 제어·예산·재시도 | Ops | 부분 완료 | P1 | 1.5~2일 | 4 |
@@ -91,11 +91,11 @@
 - 파일 해시와 evidence record의 연결을 보존한다.
 - 대용량 증거가 저장소를 무제한 키우지 않도록 현재 상한을 유지한다.
 
-## 4. 논문 실행 계약 고정 — 다음 Core 작업
+## 4. 논문 실행 계약 고정 — 완료
 
-**문제.** 현재는 역할별 모델 override와 실행 중 설정 변경을 허용한다. 이는 제품 기능으로는 유용하지만, 논문의 고정 하네스-모델 구성과 고정 반복 예산 `T`를 재현한 실행인지 구별하기 어렵게 한다.
+`paper`와 `extended` protocol이 설정과 run record에 구현돼 있다. `paper`는 동일한 resolved model/reasoning, harness와 adapter version, 초기 `T`, 전체 config, 역할별 prompt·도구·workspace 계약을 canonical SHA-256 receipt로 고정한다. resume 시 저장 receipt 자체의 해시를 먼저 검산하고 현재 계약을 다시 계산하며, 어느 쪽이든 다르면 config와 run record를 갱신하기 전에 중단한다.
 
-**구현.** 설정에 실행 프로토콜을 명시한다.
+설정에 실행 프로토콜을 명시한다.
 
 ```json
 {
@@ -103,18 +103,19 @@
 }
 ```
 
-- `paper`: 세 역할의 base harness와 버전, provider/model ID, reasoning 설정은 같다. 역할별 prompt, 읽기·쓰기 권한, 도구·스킬 집합은 달라도 되지만 run 시작 시 고정된 role contract로 기록한다. 시작 시 정한 `T`와 이 계약은 실행 중 바꿀 수 없다.
-- `extended`: 역할별 모델, 사람 체크포인트, 기타 운영 확장을 허용한다. 결과에는 반드시 non-paper run으로 표시한다.
+- `paper`: 세 역할의 base harness와 버전, resolved provider/model ID, reasoning 설정은 같다. 역할별 prompt, 읽기·쓰기 권한, 도구·스킬 집합은 달라도 되지만 run 시작 시 고정된 role contract로 기록한다. 시작 시 정한 `T`와 이 계약은 실행 중 바꿀 수 없다.
+- `extended`: 역할별 모델과 현재·향후 운영 확장을 허용하는 non-paper run으로 표시한다.
 - 실행 시작 시 harness/model/reasoning/role contract/tool policy/초기 `T`를 묶은 `protocol_sha256`을 기록한다.
-- resume 시 현재 설정과 receipt가 다르면 중단한다. 반복 수 연장은 같은 실행의 수정이 아니라 새 run 또는 명시적 fork로 기록한다.
+- resume 시 현재 설정과 receipt가 다르면 중단한다. 반복 수 연장은 같은 실행을 수정하지 않고 다른 workspace의 새 run으로 시작한다.
+- 실제 역할 호출이 receipt의 resolved model identity와 다른 모델을 보고하면 해당 실행을 실패시킨다.
 - QA의 독립성은 다른 모델이 아니라 새 세션, read-only 후보, 별도 QA worktree, 역할별 도구 제한으로 검사한다.
-- 기존 config에 `protocol`이 없으면 현재 동작을 보존하기 위해 `extended`로 해석하고 manifest에 legacy default를 남긴다. 새 문서와 예시는 `paper`를 명시한다.
+- 기존 config에 `protocol`이 없으면 현재 동작을 보존하기 위해 `extended`로 해석하고 manifest에 legacy default를 남긴다. 이때 사후 생성한 receipt는 `legacy_reconstruction`으로 표시해 과거 시작 조건의 증명처럼 취급하지 않는다. 새 config 예시는 목적에 맞는 protocol을 반드시 명시한다.
 
-**수용 기준.** 같은 구성의 `paper` run은 정상 실행된다. 모델·도구·`T`를 바꾼 resume은 거부된다. `extended` run은 허용되지만 manifest와 report에 명확히 표시된다. `protocol` 없는 기존 config는 `extended`와 legacy marker로 재현되고, 새 예시는 `paper`를 명시한다.
+자동 테스트는 동일한 `paper` resume, configured/resolved 모델·runtime policy·`T`·harness version 변경 거부, 저장 receipt 변조 감지, 거부 시 config/run record 불변, legacy `extended` 이관을 검증한다. status와 생성 report는 protocol 종류, legacy/origin marker, receipt hash를 표시한다.
 
 ## 5. 저장소·CI·문서 기준선 — 완료
 
-런타임, PRD coverage, 재현 가능한 검증이 의미 단위 커밋으로 정리돼 있고 CI와 README, 예제가 현재 동작과 맞춰져 있다. 기준일 현재 `npm test` 결과는 48/48 통과다.
+런타임, PRD coverage, 재현 가능한 검증이 의미 단위 커밋으로 정리돼 있고 CI와 README, 예제가 현재 동작과 맞춰져 있다. 기준일 현재 `npm test` 결과는 49/49 통과다.
 
 ## 6. QA에 후보 diff 제공 — 다음 QA 정확도 작업
 
@@ -220,7 +221,7 @@ CLI나 프로젝트 도구로 표현할 수 없는 브라우저, DB, 외부 서�
 
 ## 15. 입력 receipt와 무결성 검증 — 부분 완료
 
-현재 candidate/spec/catalog/evidence 계열 해시가 일부 기록된다. 다음을 하나의 run receipt로 완성한다.
+현재 candidate/spec/catalog/evidence 계열 해시와 protocol/config/role-contract receipt가 기록되고, protocol receipt는 resume 시 자체 해시를 검산한다. 다음을 하나의 run receipt와 독립 검증 명령으로 완성한다.
 
 - 각 역할의 system+user 입력 해시
 - spec, development plan, config, protocol, candidate tree 해시
@@ -273,12 +274,11 @@ receipt는 비밀 값 자체를 저장하지 않고, 재현에 필요한 공개 
 
 ## 권장 진행 순서
 
-1. **4번**으로 paper/extended 실행을 구분하고 고정 계약을 잠근다.
-2. 서로 독립적인 **6번 후보 diff**와 **8A 에스컬레이션**을 병렬로 진행한다.
-3. **9번 progressive disclosure**를 적용한다. 기본 disclosure 작업은 6번과 병렬 착수할 수 있지만 QA diff 연결은 6번 계약이 끝난 뒤 합친다.
-4. **10번**으로 역할별 하네스 자원을 안전하게 노출한다.
-5. 실제 장기 run 전에 **7번**의 lifecycle·예산·재시도를 추가한다.
-6. 초안식 **8B 후보 복구**는 실제 결정적 회귀가 관찰될 때만 별도 opt-in으로 검증한다.
-7. 성능 비교가 필요해졌을 때만 **14번과 18번**을 묶어 실험한다.
+1. 서로 독립적인 **6번 후보 diff**와 **8A 에스컬레이션**을 병렬로 진행한다.
+2. **9번 progressive disclosure**를 적용한다. 기본 disclosure 작업은 6번과 병렬 착수할 수 있지만 QA diff 연결은 6번 계약이 끝난 뒤 합친다.
+3. **10번**으로 역할별 하네스 자원을 안전하게 노출한다.
+4. 실제 장기 run 전에 **7번**의 lifecycle·예산·재시도를 추가한다.
+5. 초안식 **8B 후보 복구**는 실제 결정적 회귀가 관찰될 때만 별도 opt-in으로 검증한다.
+6. 성능 비교가 필요해졌을 때만 **14번과 18번**을 묶어 실험한다.
 
 12, 13, 16, 17은 구체적인 사용 사례가 생기기 전에는 확장하지 않는다.

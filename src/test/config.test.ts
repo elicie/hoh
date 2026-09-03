@@ -7,17 +7,34 @@ import { DEFAULT_CONFIG, mergeConfig, modelForRole, pickConfigFile, readConfigFi
 import { buildPiModelsJson, discoverModels, expandEnv, materializePiModels, toPiModel } from "../runtime/providers.js";
 import { startFakeOpenAI } from "./fake-openai.js";
 import { runHoh } from "../runtime/loop.js";
+import { buildProtocolReceipt, canonicalSha256 } from "../runtime/protocol.js";
 import { readJson, RunPaths } from "../runtime/state.js";
 import type { HohConfig } from "../runtime/config.js";
 import type { RunConfig } from "../types.js";
 import { makeWorkspace } from "./helpers.js";
 
-test("config: merge, per-role model fallback, validation", () => {
+test("config: merge, per-role model fallback, validation", async () => {
   const c = mergeConfig(DEFAULT_CONFIG, { harness: "pi", models: { default: "a/x", tester: "b/y:high" }, checks: [{ name: "b", command: "true" }] });
   assert.equal(modelForRole(c, "planner"), "a/x");
   assert.equal(modelForRole(c, "developer"), "a/x");
   assert.equal(modelForRole(c, "tester"), "b/y:high");
+  assert.equal(c.protocol, "extended", "missing protocol preserves legacy behavior");
   assert.deepEqual(validateConfig(c), []);
+
+  const paper = mergeConfig(DEFAULT_CONFIG, { protocol: "paper", harness: "mock", models: { default: "a/x" } });
+  assert.deepEqual(validateConfig(paper), []);
+  const splitPaper = mergeConfig(paper, { models: { tester: "b/y:high" } });
+  assert.ok(validateConfig(splitPaper).some((e) => /paper protocol requires one identical model pattern/.test(e)));
+  assert.ok(validateConfig(mergeConfig(DEFAULT_CONFIG, { protocol: null } as any)).some((e) => /protocol must be/.test(e)));
+  assert.equal(canonicalSha256({ b: 2, a: { d: 4, c: 3 } }), canonicalSha256({ a: { c: 3, d: 4 }, b: 2 }));
+
+  const divergentResolver = createDemoMockHarness();
+  let resolution = 0;
+  Object.defineProperty(divergentResolver, "resolveModel", { value: async () => `mock:resolved-${(resolution += 1)}` });
+  await assert.rejects(
+    buildProtocolReceipt(paper, divergentResolver, { legacyDefault: false, origin: "run_start" }),
+    /paper protocol requires one identical resolved model\/reasoning identity/,
+  );
 
   const bad = mergeConfig(DEFAULT_CONFIG, { harness: "pi", loops: 0, artifact_dir: "../out", checks: [{ name: "", command: "" }] } as any);
   const errors = validateConfig(bad);
@@ -88,7 +105,12 @@ test("config: per-role models reach the harness and the run record; stored confi
     assert.equal(stored.timeouts.check_min, 10, "unspecified values fall back to defaults");
     const run = (await readJson<RunConfig>(paths.runJson))!;
     assert.equal(run.config_source, "test");
+    assert.equal(run.protocol_receipt?.mode, "extended");
+    assert.equal(run.protocol_receipt?.legacy_default, true);
+    assert.equal(run.protocol_receipt?.origin, "run_start");
+    assert.match(run.protocol_receipt?.protocol_sha256 ?? "", /^[0-9a-f]{64}$/);
     assert.match(await readFile(paths.readme, "utf8"), /tester=m\/tester:high/);
+    assert.match(await readFile(paths.readme, "utf8"), /Protocol:\*\* EXTENDED \(legacy default\)/);
 
     // Resume without overrides: stored config is used; a loops override extends the budget and is stored.
     const again = await runHoh({ workspace: ws, harness, config: { loops: 2 } });
@@ -96,8 +118,106 @@ test("config: per-role models reach the harness and the run record; stored confi
     assert.equal(again.results[0].evidence.usage.model, "mock:m/tester:high");
     assert.equal((await readJson<HohConfig>(paths.config))!.loops, 2);
 
+    // A pre-receipt run migrates forward as legacy extended, never as paper.
+    const legacyRun = (await readJson<RunConfig>(paths.runJson))! as RunConfig & { protocol_receipt?: unknown };
+    const legacyConfig = (await readJson<HohConfig>(paths.config))! as HohConfig & { protocol?: unknown };
+    delete legacyRun.protocol_receipt;
+    delete (legacyRun.config as Partial<HohConfig>).protocol;
+    delete (legacyConfig as Partial<HohConfig>).protocol;
+    await writeFile(paths.runJson, `${JSON.stringify(legacyRun, null, 2)}\n`);
+    await writeFile(paths.config, `${JSON.stringify(legacyConfig, null, 2)}\n`);
+    await assert.rejects(
+      runHoh({
+        workspace: ws,
+        harness,
+        config: { protocol: "paper", models: { default: "m/shared", planner: "m/shared", developer: "m/shared", tester: "m/shared" } },
+      }),
+      /cannot change run protocol from extended to paper/,
+    );
+    const migrated = await runHoh({ workspace: ws, harness });
+    assert.equal(migrated.results.length, 0);
+    assert.equal(migrated.run.protocol_receipt?.mode, "extended");
+    assert.equal(migrated.run.protocol_receipt?.legacy_default, true);
+    assert.equal(migrated.run.protocol_receipt?.origin, "legacy_reconstruction");
+
     // A harness that does not match the configured one is refused.
     await assert.rejects(runHoh({ workspace: ws, harness: { name: "pi", invoke: async () => ({ finalText: "", submissions: {}, usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: 0 }, turns: 0 }) } }), /configured harness is "mock"/);
+  } finally {
+    await cleanup();
+  }
+});
+
+test("config: paper protocol receipt locks models, role contracts, runtime policy, and T on resume", async () => {
+  const { ws, spec, cleanup } = await makeWorkspace();
+  try {
+    const harness = createDemoMockHarness();
+    const result = await runHoh({
+      workspace: ws,
+      specPath: spec,
+      harness,
+      config: { protocol: "paper", harness: "mock", loops: 1, models: { default: "m/shared:high" } },
+      configSource: "paper-test",
+    });
+    const paths = new RunPaths(ws);
+    const receipt = result.run.protocol_receipt!;
+    assert.equal(receipt.mode, "paper");
+    assert.equal(receipt.legacy_default, false);
+    assert.equal(receipt.origin, "run_start");
+    assert.equal(receipt.initial_loops, 1);
+    assert.deepEqual(receipt.models, {
+      planner: "mock:m/shared:high",
+      developer: "mock:m/shared:high",
+      tester: "mock:m/shared:high",
+    });
+    assert.equal(receipt.harness.version, "builtin-1");
+    assert.deepEqual(receipt.role_contracts.planner.builtin_tools, ["read", "grep", "find", "ls"]);
+    assert.deepEqual(receipt.role_contracts.tester.structured_tools, ["submit_evidence"]);
+    assert.equal(receipt.role_contracts.tester.workspace, "isolated-read-only");
+    assert.match(receipt.protocol_sha256, /^[0-9a-f]{64}$/);
+
+    const resumed = await runHoh({ workspace: ws, harness });
+    assert.equal(resumed.results.length, 0);
+    assert.equal(resumed.run.protocol_receipt?.protocol_sha256, receipt.protocol_sha256);
+    const configBeforeRejectedResume = await readFile(paths.config, "utf8");
+    const runBeforeRejectedResume = await readFile(paths.runJson, "utf8");
+
+    await assert.rejects(
+      runHoh({ workspace: ws, harness, config: { loops: 2 } }),
+      /cannot resume paper run .*protocol contract changed/,
+    );
+    assert.equal(await readFile(paths.config, "utf8"), configBeforeRejectedResume, "a rejected resume must not rewrite config");
+    assert.equal(await readFile(paths.runJson, "utf8"), runBeforeRejectedResume, "a rejected resume must not rewrite run receipt");
+
+    await assert.rejects(
+      runHoh({
+        workspace: ws,
+        harness,
+        config: { models: { default: "m/other:high", planner: "m/other:high", developer: "m/other:high", tester: "m/other:high" } },
+      }),
+      /cannot resume paper run .*protocol contract changed/,
+    );
+    await assert.rejects(
+      runHoh({ workspace: ws, harness, config: { checks: [{ name: "new-policy", command: "true" }] } }),
+      /cannot resume paper run .*protocol contract changed/,
+    );
+
+    await assert.rejects(
+      runHoh({ workspace: ws, harness, config: { protocol: "extended" } }),
+      /cannot change run protocol from paper to extended/,
+    );
+
+    const changedHarness = createDemoMockHarness();
+    Object.defineProperty(changedHarness, "version", { value: "builtin-2" });
+    await assert.rejects(runHoh({ workspace: ws, harness: changedHarness }), /cannot resume paper run .*protocol contract changed/);
+    assert.equal(await readFile(paths.config, "utf8"), configBeforeRejectedResume);
+    assert.equal(await readFile(paths.runJson, "utf8"), runBeforeRejectedResume);
+
+    const tamperedRun = JSON.parse(runBeforeRejectedResume) as RunConfig;
+    tamperedRun.protocol_receipt!.models.planner = "mock:tampered";
+    const tamperedText = `${JSON.stringify(tamperedRun, null, 2)}\n`;
+    await writeFile(paths.runJson, tamperedText);
+    await assert.rejects(runHoh({ workspace: ws, harness }), /stored protocol receipt failed its integrity check/);
+    assert.equal(await readFile(paths.runJson, "utf8"), tamperedText, "an invalid receipt must not be rewritten");
   } finally {
     await cleanup();
   }

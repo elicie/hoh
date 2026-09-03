@@ -29,6 +29,13 @@ to the exact candidate, and records every loop in git.
 | Developer | `read bash edit write grep find ls` | workspace | A_t (commit + artifact tree hash → candidate id) |
 | QA Tester | `read bash grep find ls` + `submit_evidence` | isolated git worktree of the candidate | E_t (`evidence.json`) |
 
+- **Run protocol.** `protocol: "paper"` fixes the base harness and version,
+  one model/reasoning pattern, role prompt and tool contracts, runtime policy,
+  and iteration budget for the life of the run. Their canonical SHA-256 receipt
+  is stored in `.hoh/run.json`; a changed contract is rejected before resume.
+  `protocol: "extended"` keeps product-specific role-model and budget overrides.
+  Configs without the field are treated as legacy `extended` runs, never
+  retroactively labeled paper-compatible.
 - **Candidate identity.** After the Developer finishes, the runtime commits the
   workspace and hashes only the configured `artifact_dir` subtree, respecting
   Git ignore rules. `artifact_dir: "."` means the whole workspace except
@@ -117,13 +124,15 @@ iterations/loop-NN/
 
 ## Configuration
 
-Models, providers, harness, budget, checks and timeouts live in a config file,
+Protocol, models, providers, harness, budget, checks and timeouts live in a config file,
 not in CLI flags. This repository ships `hoh.config.json`; edit it (or point
 `--config` at another file). Providers are OpenAI-compatible endpoints; model
-lists can be discovered from `GET {base_url}/models`.
+lists can be discovered from `GET {base_url}/models`. The root config uses
+`paper`; the split-model example below is deliberately `extended`.
 
 ```json
 {
+  "protocol": "extended",
   "harness": "pi",
   "providers": {
     "spbros": {
@@ -156,6 +165,7 @@ lists can be discovered from `GET {base_url}/models`.
 
 | Key | Meaning |
 | --- | --- |
+| `protocol` | `paper` fixes the initial harness/model/role/runtime contract and `T`; `extended` permits the product-specific overrides described below. Missing means legacy `extended` |
 | `harness` | `pi` (real) or `mock` (scripted dry run) |
 | `providers.<name>.base_url` | OpenAI-compatible endpoint (`…/v1`); may reference `$ENV` |
 | `providers.<name>.api_key` | `"$ENV_VAR"` or `"!command"`. Literal keys are accepted only for localhost endpoints, because the config is committed with the run record |
@@ -165,7 +175,7 @@ lists can be discovered from `GET {base_url}/models`.
 | `providers.<name>.model_defaults` / `model_overrides` | `reasoning`, `context_window`, `max_tokens`, `input`, `cost`, `compat` per model; overrides are keyed by model id |
 | `providers.<name>.headers` / `compat` | extra headers (`$ENV` allowed) and pi compat flags (snake_case accepted) |
 | `models.default` | model pattern used by every role: `provider/model[:thinking]`. Custom providers from `providers` and pi's built-in ones (`anthropic/…`, `openai-codex/…`, `minimax/…`) both work |
-| `models.planner` / `developer` / `tester` | per-role override. The paper uses one fixed model for all roles; overrides are optional |
+| `models.planner` / `developer` / `tester` | per-role override for `extended`; under `paper`, every configured pattern must be identical and the receipt records its concrete resolution |
 | `loops` | iteration budget T |
 | `artifact_dir` | artifact directory inside the workspace (`.` = whole workspace minus `.hoh/`) |
 | `worktree_setup` | optional command run once per QA attempt in the isolated candidate worktree root before the checks (e.g. `cd tools && npm ci`), with the `HOH_*` check environment; recorded as check `setup`, whose failure blocks QA. It must not create or change non-ignored files in `artifact_dir`, or the candidate hash check invalidates QA |
@@ -176,11 +186,18 @@ lists can be discovered from `GET {base_url}/models`.
 Resolution order, first wins:
 
 1. `--config <file>`
-2. `<workspace>/.hoh/config.json` — the run's own copy, committed with the record; edit it between invocations to change models mid-run
+2. `<workspace>/.hoh/config.json` — the run's own copy, committed with the record; only `extended` runs may accept material changes on resume
 3. `./hoh.config.json` in the current directory (this repo's file when you run from here)
 4. built-in defaults
 
-`--loops <n>` is the only run-time override; it is stored back into the run config.
+`--loops <n>` is the only CLI run-time override. It is stored for an
+`extended` run; a `paper` run rejects it when it changes the initial `T`.
+The runtime creates a `paper` receipt only at run start, verifies the stored
+receipt's own hash before resume, recomputes the current contract, and rejects
+an invocation whose harness reports a model other than the receipt's resolved
+identity. A pre-receipt run is always preserved as `extended`; its synthesized
+receipt is marked `legacy_reconstruction` and does not attest to the original
+run-start conditions.
 Provider configuration records environment-variable references rather than
 literal keys: `.env` files in the current directory and workspace are loaded
 automatically (this repo's `.env` is git-ignored), and `.hoh/pi-models.json`
@@ -218,8 +235,10 @@ node dist/cli.js run    --workspace ../my-game --spec ./PRD.md     # run the bud
 node dist/cli.js status --workspace ../my-game
 ```
 
-Re-running with the same workspace resumes after the last completed loop;
-`--loops <n>` extends the budget. If `claims.json` is absent, `run` asks the
+Re-running with the same workspace resumes after the last completed loop.
+For an `extended` run, `--loops <n>` may extend the budget. For a `paper` run,
+start a new run in another workspace instead of mutating the receipt. If
+`claims.json` is absent, `run` asks the
 Planner model to draft it before loop 1 and commits it with the run record.
 The generated catalog is a draft: review its PRD coverage and `requires` fields
 before relying on the coverage total. The runtime enforces declared evidence
@@ -241,9 +260,10 @@ npm test
 - `loop.test.ts`: end-to-end loops with a scripted harness, ledger
   transitions, candidate freezing, `.hoh/` guard, retry and fallback paths,
   resume, failed checks.
-- `config.test.ts`: config merge and validation, file resolution order,
-  per-role models reaching the harness and the run record, stored config on
-  resume, provider validation, pi models.json mapping, model discovery.
+- `config.test.ts`: config merge and validation, paper/extended protocol
+  receipts and resume guards, file resolution order, per-role models reaching
+  the harness and run record, provider validation, pi models.json mapping,
+  model discovery.
 - `coverage.test.ts`: fixed-claim initialization, cross-loop status transitions,
   required evidence types, prompt/report/status rendering, and `init-claims`.
 - `evidence-files.test.ts`: durable Tester files, check output, SHA-256 binding,

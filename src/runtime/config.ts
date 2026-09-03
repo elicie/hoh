@@ -14,9 +14,10 @@
 import { readFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import type { CheckSpec, Role } from "../types.js";
+import { ROLES, type CheckSpec, type Role } from "../types.js";
 
 export type HarnessName = "pi" | "mock";
+export type ExecutionProtocol = "paper" | "extended";
 
 export type ProviderApi = "openai-completions" | "openai-responses" | "anthropic-messages";
 
@@ -60,6 +61,8 @@ export interface ModelsConfig {
 }
 
 export interface HohConfig {
+  /** paper = fixed harness-model/runtime contract; extended = product-specific overrides */
+  protocol: ExecutionProtocol;
   harness: HarnessName;
   /** custom endpoints, referenced from `models` as "<provider>/<model id>" */
   providers: Record<string, ProviderConfig>;
@@ -88,6 +91,8 @@ export interface HohConfig {
 }
 
 export const DEFAULT_CONFIG: HohConfig = {
+  // Missing protocol fields deliberately resolve to extended for legacy compatibility.
+  protocol: "extended",
   harness: "pi",
   providers: {},
   models: {},
@@ -108,6 +113,9 @@ export const CONFIG_FILE_NAME = "hoh.config.json";
 export function mergeConfig(base: HohConfig, patch: ConfigPatch | null | undefined): HohConfig {
   if (!patch) return structuredClone(base);
   const merged: HohConfig = {
+    // Preserve an explicitly invalid value so validation reports it instead of
+    // silently treating `null`/`undefined` from raw JSON as an omitted field.
+    protocol: (Object.prototype.hasOwnProperty.call(patch, "protocol") ? patch.protocol : base.protocol) as ExecutionProtocol,
     harness: patch.harness ?? base.harness,
     providers: structuredClone({ ...base.providers, ...stripUndefined(patch.providers ?? {}) }) as Record<string, ProviderConfig>,
     models: { ...base.models, ...stripUndefined(patch.models ?? {}) },
@@ -132,6 +140,9 @@ function stripUndefined<T extends object>(o: T): T {
 
 export function validateConfig(c: HohConfig): string[] {
   const errors: string[] = [];
+  if (c.protocol !== "paper" && c.protocol !== "extended") {
+    errors.push(`protocol must be "paper" or "extended", got ${JSON.stringify(c.protocol)}`);
+  }
   if (c.harness !== "pi" && c.harness !== "mock") errors.push(`harness must be "pi" or "mock", got ${JSON.stringify(c.harness)}`);
   if (!Number.isInteger(c.loops) || c.loops < 1) errors.push(`loops must be a positive integer, got ${JSON.stringify(c.loops)}`);
   if (typeof c.artifact_dir !== "string" || !c.artifact_dir || path.isAbsolute(c.artifact_dir) || c.artifact_dir.startsWith(".."))
@@ -142,6 +153,14 @@ export function validateConfig(c: HohConfig): string[] {
   }
   if (c.harness === "pi" && !c.models.default && !(c.models.planner && c.models.developer && c.models.tester)) {
     errors.push("models.default (or planner+developer+tester) must be set for the pi harness");
+  }
+  if (c.protocol === "paper") {
+    const patterns = ROLES.map((role) => modelForRole(c, role) ?? null);
+    if (new Set(patterns).size !== 1) {
+      errors.push(
+        `paper protocol requires one identical model pattern for planner, developer, and tester (configured: ${ROLES.map((role, i) => `${role}=${patterns[i] ?? "(harness default)"}`).join(", ")})`,
+      );
+    }
   }
   if (!c.providers || typeof c.providers !== "object" || Array.isArray(c.providers)) errors.push("providers must be an object keyed by provider name");
   else

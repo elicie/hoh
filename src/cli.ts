@@ -44,13 +44,13 @@ Usage:
   hoh status --workspace <dir>
   hoh config --workspace <dir> [--config <file>]      effective config, discovered models, per-role resolution
 
-Configuration (${CONFIG_FILE_NAME}) — providers, models, harness, budget, checks, timeouts:
+Configuration (${CONFIG_FILE_NAME}) — protocol, providers, models, harness, budget, checks, timeouts:
   1. --config <file>                  explicit
-  2. <workspace>/.hoh/config.json     the run's own config, editable between invocations
+  2. <workspace>/.hoh/config.json     the run's own config; changes are accepted only for extended runs
   3. ./${CONFIG_FILE_NAME}             tool-level default in the current directory
   4. built-in defaults
 
-  --loops <n> overrides the budget for this invocation (and is stored).
+  --loops <n> overrides the budget for an extended run. A paper run's initial budget is immutable.
 
 Secrets: api_key values are "$ENV_VAR" references. \`.env\` files in the current directory and in the
 workspace are loaded automatically (existing environment variables win).
@@ -88,7 +88,7 @@ async function resolve(values: { workspace?: string; config?: string; loops?: st
     if (!Number.isInteger(loops) || loops < 1) throw new Error("--loops must be a positive integer");
     patch = { ...(patch ?? {}), loops };
   }
-  const stored = await readJson<HohConfig>(paths.config);
+  const stored = await readJson<ConfigPatch>(paths.config);
   const effective = mergeConfig(stored ? mergeConfig(DEFAULT_CONFIG, stored) : DEFAULT_CONFIG, patch);
   return { workspace, patch, source: picked.source + (values.loops !== undefined ? ` + --loops ${values.loops}` : ""), effective };
 }
@@ -153,7 +153,12 @@ async function showStatus(workspace: string): Promise<number> {
   const coverage = catalog ? await loadCoverage(paths, catalog) : null;
   const loops = await collectLoops(paths);
   const models = ROLES.map((r) => `${r}=${modelForRole(run.config, r) ?? "(harness default)"}`).join(", ");
-  process.stdout.write(`Run ${run.run_id} — harness ${run.config.harness}, budget ${run.config.loops} loops\nModels: ${models}\n`);
+  const receipt = run.protocol_receipt;
+  process.stdout.write(
+    `Run ${run.run_id} — protocol ${(receipt?.mode ?? run.config.protocol ?? "extended").toUpperCase()}${receipt?.legacy_default ? " (legacy default)" : ""}${receipt?.origin === "legacy_reconstruction" ? " (receipt reconstructed)" : ""}, harness ${run.config.harness}, budget ${run.config.loops} loops\n`,
+  );
+  if (receipt) process.stdout.write(`Protocol receipt: ${receipt.protocol_sha256}\n`);
+  process.stdout.write(`Models: ${models}\n`);
   process.stdout.write(`Ledger: open ${s.open}, regressed ${s.regressed}, closed ${s.closed}, all ${s.all}\n\n`);
   if (catalog && coverage) {
     const c = coverageSummary(catalog, coverage);

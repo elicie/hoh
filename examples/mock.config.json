@@ -1,4 +1,5 @@
 {
+  "protocol": "paper",
   "harness": "mock",
   "loops": 2,
   "artifact_dir": ".",
