@@ -7,6 +7,7 @@ import type { Harness, RoleInvocation, RoleResult } from "../harness/types.js";
 import { createDemoMockHarness } from "../harness/mock.js";
 import { mergeConfig, DEFAULT_CONFIG, validateConfig } from "../runtime/config.js";
 import { runHoh } from "../runtime/loop.js";
+import { verifyCurrentRunReceipt } from "../runtime/run-receipt.js";
 import { loadBudgetLedger, RunPaths } from "../runtime/state.js";
 import type { Role, UsageTotals } from "../types.js";
 import { makeWorkspace } from "./helpers.js";
@@ -156,6 +157,7 @@ test("budget exhaustion blocks the next role, creates no error record, and is st
       detected_at: first.budget.exhaustion?.detected_at,
     });
     assert.equal(await exists(paths.errorJson(1)), false, "budget control flow is not a runtime error");
+    assert.equal((await verifyCurrentRunReceipt(ws)).ok, true, "budget exhaustion must leave a verifiable checkpoint");
 
     const resumedHarness = meteredHarness({ planner: usage(100, 100), developer: usage(100, 100), tester: usage(100, 100) });
     const resumed = await runHoh({ workspace: ws, harness: resumedHarness });
@@ -164,6 +166,7 @@ test("budget exhaustion blocks the next role, creates no error record, and is st
     assert.equal(resumed.budget.totals.total_tokens, 7);
     assert.equal(resumed.budget.attempts.length, 1);
     assert.equal(await exists(paths.errorJson(1)), false);
+    assert.equal((await verifyCurrentRunReceipt(ws)).ok, true, "a no-op exhausted resume must keep the checkpoint verifiable");
   } finally {
     await cleanup();
   }

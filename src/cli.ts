@@ -5,6 +5,7 @@
  *   hoh run    --workspace <dir> --spec <PRD.md> [--config <file>] [--loops <n>] [--detach]
  *   hoh init-claims --workspace <dir> --spec <PRD.md> [--config <file>]
  *   hoh status --workspace <dir>
+ *   hoh verify --workspace <dir>
  *   hoh stop   --workspace <dir>
  *   hoh logs   --workspace <dir> [-f]
  *   hoh config --workspace <dir> [--config <file>]
@@ -49,6 +50,8 @@ import { runHoh } from "./runtime/loop.js";
 import { coverageSummary, loadClaimCatalog, loadCoverage } from "./runtime/coverage.js";
 import { commitAll, ensureRepo, RUNTIME_IDENTITY } from "./runtime/git.js";
 import { collectLoops } from "./runtime/report.js";
+import type { RunReceiptVerificationIssue } from "./runtime/receipt.js";
+import { verifyCurrentRunReceipt } from "./runtime/run-receipt.js";
 import { loadBudgetLedger, loadLedger, loadRun, readJson, RunPaths } from "./runtime/state.js";
 import { ROLES, type BudgetLedger } from "./types.js";
 
@@ -58,6 +61,7 @@ Usage:
   hoh run    --workspace <dir> --spec <PRD.md> [--config <file>] [--loops <n>] [--detach]
   hoh init-claims --workspace <dir> --spec <PRD.md> [--config <file>]
   hoh status --workspace <dir>
+  hoh verify --workspace <dir>                          offline run-receipt verification
   hoh stop   --workspace <dir>
   hoh logs   --workspace <dir> [-f]
   hoh config --workspace <dir> [--config <file>]      effective config, discovered models, per-role resolution
@@ -189,11 +193,17 @@ async function showStatus(workspace: string): Promise<number> {
   const loops = await collectLoops(paths);
   const budget = await loadBudgetLedger(paths);
   const models = ROLES.map((r) => `${r}=${modelForRole(run.config, r) ?? "(harness default)"}`).join(", ");
-  const receipt = run.protocol_receipt;
+  const protocolReceipt = run.protocol_receipt;
+  const runReceipt = await verifyCurrentRunReceipt(workspace);
   process.stdout.write(
-    `Run ${run.run_id} — protocol ${(receipt?.mode ?? run.config.protocol ?? "extended").toUpperCase()}${receipt?.legacy_default ? " (legacy default)" : ""}${receipt?.origin === "legacy_reconstruction" ? " (receipt reconstructed)" : ""}, harness ${run.config.harness}, budget ${run.config.loops} loops\n`,
+    `Run ${run.run_id} — protocol ${(protocolReceipt?.mode ?? run.config.protocol ?? "extended").toUpperCase()}${protocolReceipt?.legacy_default ? " (legacy default)" : ""}${protocolReceipt?.origin === "legacy_reconstruction" ? " (receipt reconstructed)" : ""}, harness ${run.config.harness}, budget ${run.config.loops} loops\n`,
   );
-  if (receipt) process.stdout.write(`Protocol receipt: ${receipt.protocol_sha256}\n`);
+  if (protocolReceipt) process.stdout.write(`Protocol receipt: ${protocolReceipt.protocol_sha256}\n`);
+  process.stdout.write(
+    runReceipt.ok
+      ? `Run receipt: VERIFIED ${runReceipt.receipt!.receipt_sha256}\n`
+      : `Run receipt: INVALID (${runReceipt.issues.map((issue) => issue.code).join(", ")})\n`,
+  );
   process.stdout.write(`Models: ${models}\n`);
   if (budget) printBudgetStatus(budget);
   process.stdout.write(`Ledger: open ${s.open}, regressed ${s.regressed}, closed ${s.closed}, all ${s.all}\n\n`);
@@ -210,6 +220,28 @@ async function showStatus(workspace: string): Promise<number> {
   }
   process.stdout.write(`\nRecord: ${paths.readme}\nConfig: ${paths.config}\n`);
   return 0;
+}
+
+async function showVerify(workspace: string): Promise<number> {
+  const result = await verifyCurrentRunReceipt(workspace);
+  if (result.ok) {
+    const candidate = result.receipt!.candidate;
+    process.stdout.write(
+      `Run receipt VERIFIED: ${result.receipt!.receipt_sha256}\n` +
+        `Artifacts: ${result.receipt!.artifacts.length}\n` +
+        `Candidate: ${candidate ? `${candidate.commit_oid} / ${candidate.tree_oid}` : "none"}\n`,
+    );
+    return 0;
+  }
+  process.stderr.write(`Run receipt verification FAILED for ${workspace}\n`);
+  for (const issue of result.issues) process.stderr.write(`  - ${formatVerificationIssue(issue)}\n`);
+  return 1;
+}
+
+function formatVerificationIssue(issue: RunReceiptVerificationIssue): string {
+  const location = issue.path ? ` ${issue.path}` : issue.artifact_name ? ` ${issue.artifact_name}` : "";
+  const mismatch = issue.expected || issue.actual ? ` (expected ${issue.expected ?? "?"}, actual ${issue.actual ?? "?"})` : "";
+  return `[${issue.code}]${location}: ${issue.message}${mismatch}`;
 }
 
 function printBudgetStatus(budget: BudgetLedger): void {
@@ -326,6 +358,7 @@ async function main(argv: string[]): Promise<number> {
   if (values.detach && cmd !== "run") throw new Error("--detach is only valid with run");
   if (values.follow && cmd !== "logs") throw new Error("--follow/-f is only valid with logs");
   if (cmd === "status") return showStatus(workspace);
+  if (cmd === "verify") return showVerify(workspace);
   if (cmd === "stop") return stopRun(workspace);
   if (cmd === "logs") return showLogs(workspace, values.follow ?? false);
   if (cmd === "run" && values.detach && process.env[DETACHED_CHILD_ENV] !== "1") {

@@ -34,7 +34,7 @@
 
 ## 현재 판단
 
-현재 런타임은 세 역할의 분리 호출, 이전 후보 warm-start, QA용 동결 worktree, 실제 후보 diff, 구조화된 증거, 반복 gap 에스컬레이션, 점진적 역할 컨텍스트, 역할별 pi 자원·compaction 정책, Git 이력, 재개와 논문 실행 계약 고정을 갖췄다. 명시한 Core 계약과 7번, 10번, 11번, Codex 하네스 최소 경로가 완료됐다. 다음 구현 우선순위는 15번의 저장 전 마스킹, 통합 run receipt, 오프라인 무결성 검증이다.
+현재 런타임은 세 역할의 분리 호출, 이전 후보 warm-start, QA용 동결 worktree, 실제 후보 diff, 구조화된 증거, 반복 gap 에스컬레이션, 점진적 역할 컨텍스트, 역할별 pi 자원·compaction 정책, Git 이력, 재개와 논문 실행 계약 고정을 갖췄다. 명시한 Core 계약과 7번, 10번, 11번, 15번, 16번, Codex 하네스 최소 경로가 완료됐다. 다음 구현 우선순위는 18번의 실제 다섯 조건 실행, evaluator orchestration과 원시 결과 집계다.
 
 ## 우선순위 요약
 
@@ -54,7 +54,7 @@
 | 12 | MCP 브리지 | Extension | 필요 시 | P3 | 1일 | 10 |
 | 13 | 샌드박스 실행 가이드 | Ops | 필요 시 | P3 | 1일 | 7 |
 | 14 | 추가 하네스 어댑터 | Experiment | Codex 완료 | 유지 | – | 4 |
-| 15 | 입력 receipt와 무결성 검증 | Full | 부분 완료 | P2 | 0.5일 | 3, 4 |
+| 15 | 입력 receipt와 무결성 검증 | Full | 완료 | 유지 | – | 3, 4 |
 | 16 | 실행 리포트 확장 | Ops | 완료 | 유지 | – | 3, 15 |
 | 17 | 프로젝트 유형별 검증 키트 | Extension | 부분 완료 | P3 | 0.5일/개 | – |
 | 18 | 대조군·ablation·외부 평가 프로토콜 | Experiment | 부분 완료 | P2 | 1~2일 | 4, 14, 15 |
@@ -238,17 +238,18 @@ CLI나 프로젝트 도구로 표현할 수 없는 브라우저, DB, 외부 서�
 
 OpenCode 계열 두 번째 어댑터는 Codex로 18번 end-to-end experiment manifest를 먼저 재현한 뒤 추가한다. 논문 실험 재현 완료 판정에는 최소 한 개 대체 어댑터면 충분하므로 지금은 어댑터 수를 늘리지 않는다.
 
-## 15. 입력 receipt와 무결성 검증 — 부분 완료
+## 15. 입력 receipt와 무결성 검증 — 완료
 
-현재 candidate/spec/catalog/evidence 계열 해시, protocol/config/role-contract receipt, 역할별 최종 prompt snapshot과 입력 해시가 기록되고, protocol receipt는 resume 시 자체 해시를 검산한다. exact prompt는 메모리에서 먼저 해시하고, 저장 snapshot과 역할·claim transcript에는 설정에서 참조한 credential 값과 좁은 credential 문맥의 redaction을 적용한다. snapshot은 원문 입력 해시, 저장본 해시, redaction 여부와 고정 규칙별 교체 수를 구분해 기록한다. 원문 SHA-256은 재현성 checksum일 뿐 비밀화나 인증 수단이 아니므로 `.hoh` 기록은 계속 민감 자료로 취급한다. 남은 범위는 다음을 하나의 run receipt와 독립 검증 명령으로 묶는 것이다.
+candidate/spec/catalog/evidence 계열 해시, protocol/config/role-contract receipt, 역할별 최종 prompt snapshot과 입력 해시를 하나의 canonical run receipt와 독립 검증 명령으로 연결했다.
 
-- 역할별 prompt snapshot hash를 candidate·plan·evidence와 연결한 receipt
-- spec, development plan, config, protocol, candidate tree 해시
-- 역할별 resolved harness/model/reasoning/tool policy
-- evidence 파일 해시와 claim 연결
-- `hoh verify --workspace`의 불일치 보고
+- 안정 checkpoint마다 canonical `.hoh` regular record의 경로와 SHA-256을 기록한다. 생성 view인 `README.md`와 receipt 자체는 순환을 피하기 위해 제외하고, 검증 시 추가·누락·symlink·비정규 entry까지 exact inventory로 확인한다.
+- spec, config, protocol, development plan, prompt snapshot, transcript, budget, ledger, coverage, evidence JSON과 evidence 파일의 바이트가 receipt에 연결된다. evidence JSON 안의 claim 및 파일 SHA 연결도 함께 고정된다.
+- 현재 protocol/config hash, harness version, 역할별 tool/workspace contract, resolved model과 각 역할의 마지막 실제 reported model을 구분해 기록한다. `extended` resume은 현재 실행 계약으로 receipt를 갱신한다.
+- 후보는 현재 HEAD나 worktree가 아니라 Developer가 기록한 full commit OID, 당시 canonical `artifact_dir`, tree OID로 검증한다. 구버전 record는 candidate commit의 역사적 config에서 subtree를 복원하고, 정직하게 복원할 수 없으면 receipt 생성을 거부한다.
+- `hoh verify --workspace`는 config, `.env`, provider, harness나 네트워크를 초기화하지 않고 filesystem과 local Git object만 읽어 구조, 자체 checksum, exact inventory, artifact hash와 역사적 candidate tree의 불일치를 보고한다.
+- 정상 루프와 최종 완료뿐 아니라 초기 claim drafting 실패, loop runtime error와 budget exhaustion도 verifiable checkpoint를 남긴다. cooperative cancellation은 마지막 안정 receipt를 다시 쓰거나 실패 commit을 만들지 않는다.
 
-receipt는 비밀 값 자체를 저장하지 않고, 재현에 필요한 공개 설정과 해시만 보존한다.
+exact prompt는 메모리에서 먼저 해시하고, 저장 snapshot과 역할·claim transcript에는 설정에서 참조한 credential 값과 좁은 credential 문맥의 redaction을 적용한다. snapshot은 원문 입력 해시, 저장본 해시, redaction 여부와 고정 규칙별 교체 수를 구분한다. 원문 및 receipt SHA-256은 재현성과 불일치 탐지를 위한 checksum일 뿐 비밀화, 서명 또는 authenticity 증명이 아니다. `.hoh` 기록은 계속 민감 자료로 취급하며, portable Node의 descriptor-relative traversal 한계 때문에 검증 중 workspace가 quiescent하다는 cooperative 전제를 둔다.
 
 ## 16. 실행 리포트 확장 — 완료
 

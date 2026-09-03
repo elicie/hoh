@@ -60,7 +60,18 @@ test("config: merge, per-role model fallback, validation", async () => {
     ),
   );
 
-  for (const artifact_dir of ["nested/../../outside", ".hoh", "./.hoh/iterations", "line\nbreak"]) {
+  for (const artifact_dir of [
+    "nested/../../outside",
+    ".hoh",
+    "./.hoh/iterations",
+    "line\nbreak",
+    "windows\\separator",
+    "./game",
+    "a/../b",
+    "a//b",
+    "a/",
+    "C:/x",
+  ]) {
     assert.ok(
       validateConfig(mergeConfig(DEFAULT_CONFIG, { harness: "mock", artifact_dir })).some((e) => /artifact_dir/.test(e)),
       `${JSON.stringify(artifact_dir)} must not escape into the workspace parent or runtime records`,
@@ -170,6 +181,12 @@ test("config: per-role models reach the harness and the run record; stored confi
     assert.equal(again.results.length, 1);
     assert.equal(again.results[0].evidence.usage.model, "mock:m/tester:high");
     assert.equal((await readJson<HohConfig>(paths.config))!.loops, 2);
+
+    const configBeforeArtifactDirChange = await readFile(paths.config, "utf8");
+    const runBeforeArtifactDirChange = await readFile(paths.runJson, "utf8");
+    await assert.rejects(runHoh({ workspace: ws, harness, config: { artifact_dir: "game" } }), /cannot change artifact_dir/);
+    assert.equal(await readFile(paths.config, "utf8"), configBeforeArtifactDirChange);
+    assert.equal(await readFile(paths.runJson, "utf8"), runBeforeArtifactDirChange);
 
     // A pre-receipt run migrates forward as legacy extended, never as paper.
     const legacyRun = (await readJson<RunConfig>(paths.runJson))! as RunConfig & { protocol_receipt?: unknown };

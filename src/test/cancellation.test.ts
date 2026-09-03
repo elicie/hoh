@@ -151,10 +151,13 @@ test("cancellation: stopping Tester removes the QA worktree without recording a 
   const reason = cancellationReason("operator requested stop");
   const demo = createDemoMockHarness();
   const logs: string[] = [];
+  const paths = new RunPaths(ws);
+  let receiptBeforeAbort = "";
   const harness = new MockHarness({
     planner: (inv, api) => demo["scripts"].planner!(inv, api),
     developer: (inv, api) => demo["scripts"].developer!(inv, api),
-    tester: (inv) => {
+    tester: async (inv) => {
+      receiptBeforeAbort = await readFile(paths.receipt, "utf8");
       controller.abort(reason);
       inv.signal?.throwIfAborted();
     },
@@ -173,13 +176,15 @@ test("cancellation: stopping Tester removes the QA worktree without recording a 
       (error) => error === reason,
     );
 
-    const paths = new RunPaths(ws);
     assert.equal(await readJson<EvidenceBundle>(paths.evidenceJson(1)), null, "cancelled Tester must not emit a QA verdict");
     assert.equal(await exists(paths.errorJson(1)), false, "operator cancellation is not a runtime failure");
     const worktrees = await git(["worktree", "list"], ws);
     assert.equal(worktrees.stdout.trim().split("\n").length, 1, worktrees.stdout);
     const latest = await git(["log", "-1", "--format=%s"], ws);
     assert.doesNotMatch(latest.stdout, /runtime error/);
+    const history = await git(["log", "--format=%s"], ws);
+    assert.doesNotMatch(history.stdout, /checkpoint failed run receipt/);
+    assert.equal(await readFile(paths.receipt, "utf8"), receiptBeforeAbort, "cancellation must not rewrite the last stable receipt");
     assert.ok(logs.some((message) => /CANCELLED operator requested stop/.test(message)));
     assert.equal(process.env.HOH_CANDIDATE_DIR, undefined);
     assert.equal(process.env.HOH_EVIDENCE_DIR, undefined);

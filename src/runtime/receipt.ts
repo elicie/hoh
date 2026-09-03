@@ -75,6 +75,7 @@ export type RunReceiptVerificationCode =
   | "artifact_symlink"
   | "artifact_not_file"
   | "artifact_hash_mismatch"
+  | "artifact_unexpected"
   | "candidate_commit_missing"
   | "candidate_commit_invalid"
   | "candidate_repository_invalid"

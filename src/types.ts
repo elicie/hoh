@@ -155,6 +155,8 @@ export interface DeveloperRecord {
   base_commit_sha?: string;
   /** Exact frozen candidate Git endpoint; optional only for records from older runtimes. */
   candidate_commit_sha?: string;
+  /** Canonical artifact subtree whose Git tree identifies this candidate. */
+  artifact_subdir?: string;
   commit: string | null;
   changed_paths: string[];
   summary: string;

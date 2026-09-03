@@ -41,6 +41,15 @@ of pretending that Codex exposes pi's individual built-in tool names.
   `protocol: "extended"` keeps product-specific role-model and budget overrides.
   Configs without the field are treated as legacy `extended` runs, never
   retroactively labeled paper-compatible.
+- **Offline-verifiable run state.** At stable checkpoints, `.hoh/receipt.json`
+  binds every canonical regular `.hoh` record to its SHA-256, the resolved
+  harness/model/role contracts, and the Developer candidate's historical Git
+  commit and tree. `hoh verify` consults only local files and Git objects; it
+  does not load config, `.env`, providers, or a harness. The receipt checksum
+  detects inconsistency but is not a signature or authenticity proof, and
+  verification assumes the workspace is quiescent while files are read. The
+  receipt itself and generated `.hoh/README.md` view are excluded; CLI
+  verification also rejects unrecorded canonical files and unsafe entries.
 - **Pre-registered experiment boundary (foundation).** An immutable experiment
   plan fixes all five comparison conditions, common budget, samples, repeats,
   evaluator executable/version/rubric hashes, analysis, exclusions, and retry
@@ -176,6 +185,7 @@ run.json                    run id, budget T, harness, model, checks
 spec.md                     S, the public specification (copied from --spec)
 pi-resources.json           resolved role extension/skill/tool manifest and hashes
 budget.json                 atomic role/loop/run usage ledger and exhaustion state
+receipt.json                canonical run-state hashes, identities, and historical candidate
 ledger.json                 issue ledger
 claims.json                 fixed PRD claim catalog and required evidence types
 coverage.json               per-claim status, last verified loop, verification count
@@ -379,6 +389,7 @@ node dist/cli.js config --workspace ../my-game                     # verify mode
 node dist/cli.js init-claims --workspace ../my-game --spec ./PRD.md # optional: draft and edit claims before running
 node dist/cli.js run    --workspace ../my-game --spec ./PRD.md     # run the budgeted loops
 node dist/cli.js status --workspace ../my-game
+node dist/cli.js verify --workspace ../my-game                     # offline receipt verification
 ```
 
 Re-running with the same workspace resumes after the last completed loop.
@@ -442,6 +453,9 @@ npm test
   external-evaluator metadata non-mixing.
 - `storage-redaction-integration.test.ts`: exact in-memory role inputs while
   configured credentials are absent from prompt and transcript storage.
+- `receipt.test.ts` and `run-receipt-integration.test.ts`: canonical receipt
+  validation, safe bounded reads, historical candidate reconstruction, full
+  run-state binding, tamper reports, and config/provider-independent CLI verification.
 - `evidence-files.test.ts`: durable Tester files, check output, SHA-256 binding,
   git inclusion, path boundaries, size limits, and runtime-record protection.
 - `pi-fake.test.ts`: the real pi SDK session and tool loop driven by a fake

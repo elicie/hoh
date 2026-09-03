@@ -68,6 +68,7 @@ import { buildPromptSnapshot } from "./prompt-snapshot.js";
 import { assertProtocolReceiptIntegrity, buildProtocolReceipt, hasExplicitProtocol } from "./protocol.js";
 import { configuredProviderSecretValues, redactStorageText, type ExplicitSecretValues } from "./redaction.js";
 import { renderRunReadme, renderTesterReport } from "./report.js";
+import { assertSafeRunRecordLayout, refreshRunReceipt, verifyCurrentRunReceipt } from "./run-receipt.js";
 import { plannerTools, SUBMIT_EVIDENCE_TOOL, SUBMIT_PLAN_TOOL, testerTools } from "./schemas.js";
 import { lastCompletedLoop, loadLedger, loadRun, pad, readJson, RunPaths, writeJson, writeText } from "./state.js";
 
@@ -128,6 +129,7 @@ export async function runHoh(opts: RunOptions): Promise<RunResult> {
   const paths = new RunPaths(ws);
   const log = opts.log ?? (() => {});
   await ensureRepo(ws);
+  await assertSafeRunRecordLayout(paths);
 
   // Effective config: stored run config (if any) <- overrides.
   const stored = await readJson<ConfigPatch>(paths.config);
@@ -162,12 +164,12 @@ export async function runHoh(opts: RunOptions): Promise<RunResult> {
     await writeJson(paths.ledger, emptyLedger());
     initialized = true;
   } else {
+    const recordedConfig = mergeConfig(DEFAULT_CONFIG, run.config as ConfigPatch);
     let protocolReceipt = run.protocol_receipt;
     if (protocolReceipt) {
       assertProtocolReceiptIntegrity(protocolReceipt);
     } else {
       const recordedLegacy = !hasExplicitProtocol(run.config);
-      const recordedConfig = mergeConfig(DEFAULT_CONFIG, run.config as ConfigPatch);
       if (recordedConfig.protocol === "paper") {
         throw new Error(`cannot resume paper run ${run.run_id}: its run-start protocol receipt is missing`);
       }
@@ -186,6 +188,11 @@ export async function runHoh(opts: RunOptions): Promise<RunResult> {
         `cannot change run protocol from ${protocolReceipt.mode} to ${config.protocol}; start a new run in another workspace`,
       );
     }
+    if (recordedConfig.artifact_dir !== config.artifact_dir) {
+      throw new Error(
+        `cannot change artifact_dir from ${JSON.stringify(recordedConfig.artifact_dir)} to ${JSON.stringify(config.artifact_dir)}; candidate tree identity requires a new workspace`,
+      );
+    }
     if (protocolReceipt.mode === "paper") {
       const requestedReceipt = await buildProtocolReceipt(config, opts.harness, {
         legacyDefault: protocolReceipt.legacy_default,
@@ -197,6 +204,11 @@ export async function runHoh(opts: RunOptions): Promise<RunResult> {
           `cannot resume paper run ${run.run_id}: protocol contract changed (${protocolReceipt.protocol_sha256.slice(0, 12)} -> ${requestedReceipt.protocol_sha256.slice(0, 12)}); start a new run in another workspace`,
         );
       }
+    } else {
+      protocolReceipt = await buildProtocolReceipt(config, opts.harness, {
+        legacyDefault: protocolReceipt.legacy_default,
+        origin: protocolReceipt.origin,
+      });
     }
     const changed = JSON.stringify(run.config) !== JSON.stringify(config);
     run.config = config;
@@ -214,22 +226,35 @@ export async function runHoh(opts: RunOptions): Promise<RunResult> {
   }
   const spec = await readFile(paths.spec, "utf8");
   const storageSecrets = configuredProviderSecretValues(config);
-  const claimState = await ensureClaimState({
-    workspace: ws,
-    specPath: run.spec_path,
-    spec,
-    harness: opts.harness,
-    paths,
-    model: modelForRole(config, "planner"),
-    expectedModel: run.protocol_receipt?.mode === "paper" ? run.protocol_receipt.models.planner ?? undefined : undefined,
-    timeoutMs: config.timeouts.role_min * 60_000,
-    signal: opts.signal,
-    storageSecrets,
-  });
+  let claimState: Awaited<ReturnType<typeof ensureClaimState>>;
+  try {
+    claimState = await ensureClaimState({
+      workspace: ws,
+      specPath: run.spec_path,
+      spec,
+      harness: opts.harness,
+      paths,
+      model: modelForRole(config, "planner"),
+      expectedModel: run.protocol_receipt?.mode === "paper" ? run.protocol_receipt.models.planner ?? undefined : undefined,
+      timeoutMs: config.timeouts.role_min * 60_000,
+      signal: opts.signal,
+      storageSecrets,
+    });
+  } catch (error) {
+    if (!opts.signal?.aborted) {
+      try {
+        await refreshRunReceipt(paths, run);
+        await commitAll(ws, "chore(hoh): checkpoint initialization failure", RUNTIME_IDENTITY, [".hoh"]);
+      } catch (receiptError: any) {
+        log(`runtime: WARNING could not checkpoint initialization failure: ${receiptError?.message ?? receiptError}`);
+      }
+    }
+    throw error;
+  }
   // The optional loop-0 claim-drafting extension predates RoleUsage accounting.
   // The canonical budget boundary deliberately starts at Planner loop 1.
   const budget = await BudgetTracker.open(paths, config.budgets);
-  await writeText(paths.readme, await renderRunReadme(paths, run, await loadLedger(paths)));
+  await writeVerifiedRunCheckpoint(paths, run, await loadLedger(paths));
   if (initialized) {
     await commitAll(ws, `chore(hoh): initialize run ${run.run_id}`, RUNTIME_IDENTITY, ["."]);
     log(`initialized run ${run.run_id} in ${ws} (config: ${configSource})`);
@@ -268,19 +293,38 @@ export async function runHoh(opts: RunOptions): Promise<RunResult> {
     for (let t = done + 1; t <= config.loops; t++) {
       results.push(await runLoop(ctx, t));
       await budget.endLoop(t);
+      await writeVerifiedRunCheckpoint(paths, run, await loadLedger(paths));
+      await commitAll(ws, `chore(loop-${pad(t)}): checkpoint run receipt`, RUNTIME_IDENTITY, [
+        paths.rel(paths.budget),
+        paths.rel(paths.readme),
+        paths.rel(paths.receipt),
+      ]);
     }
   } catch (error) {
-    if (!(error instanceof BudgetExhaustedError)) throw error;
+    if (!(error instanceof BudgetExhaustedError)) {
+      if (opts.signal?.aborted) throw error;
+      try {
+        await writeVerifiedRunCheckpoint(paths, run, await loadLedger(paths));
+        await commitAll(ws, "chore(hoh): checkpoint failed run receipt", RUNTIME_IDENTITY, [".hoh"]);
+      } catch (receiptError: any) {
+        log(`runtime: WARNING could not refresh failed run receipt: ${receiptError?.message ?? receiptError}`);
+      }
+      throw error;
+    }
     const budgetLedger = await budget.finish(false);
-    await writeText(paths.readme, await renderRunReadme(paths, run, await loadLedger(paths)));
+    await writeVerifiedRunCheckpoint(paths, run, await loadLedger(paths));
     await commitAll(ws, `chore(hoh): ${error.message}`, RUNTIME_IDENTITY, [".hoh"]);
     log(`BUDGET_EXHAUSTED ${formatBudgetExhaustion(error.exhaustion)}`);
     return { run, results, ledger: await loadLedger(paths), status: "budget_exhausted", budget: budgetLedger };
   }
   if (done >= config.loops) log(`all ${config.loops} loops already completed; nothing to do`);
   const budgetLedger = await budget.finish(true);
-  await writeText(paths.readme, await renderRunReadme(paths, run, await loadLedger(paths)));
-  await commitAll(ws, "chore(hoh): finalize run accounting", RUNTIME_IDENTITY, [paths.rel(paths.budget), paths.rel(paths.readme)]);
+  await writeVerifiedRunCheckpoint(paths, run, await loadLedger(paths));
+  await commitAll(ws, "chore(hoh): finalize run accounting", RUNTIME_IDENTITY, [
+    paths.rel(paths.budget),
+    paths.rel(paths.readme),
+    paths.rel(paths.receipt),
+  ]);
   return {
     run,
     results,
@@ -473,6 +517,7 @@ export async function runLoop(ctx: Ctx, t: number): Promise<LoopResult> {
       candidate_tree_sha: tree,
       base_commit_sha: preDevelopmentCommit,
       candidate_commit_sha: candidateCommit,
+      artifact_subdir: artifactDir,
       commit,
       changed_paths: commit ? (await changedPaths(ws, preDevelopmentCommit, commit)).filter((p) => !p.startsWith(".hoh/")) : [],
       summary: developerRun.result.finalText,
@@ -737,11 +782,24 @@ export async function runLoop(ctx: Ctx, t: number): Promise<LoopResult> {
     }
     const message = err?.stack ?? String(err);
     await writeJson(paths.errorJson(t), { loop_index: t, message: err?.message ?? String(err), stack: message, at: new Date().toISOString() });
-    await writeText(paths.readme, await renderRunReadme(paths, run, await loadLedger(paths)));
+    try {
+      await writeVerifiedRunCheckpoint(paths, run, await loadLedger(paths));
+    } catch (receiptError: any) {
+      log(`${tag} runtime: WARNING could not refresh failed run receipt: ${receiptError?.message ?? receiptError}`);
+    }
     await commitAll(ws, `chore(loop-${pad(t)}): runtime error`, RUNTIME_IDENTITY, [".hoh"]);
     log(`${tag} ERROR ${err?.message ?? err}`);
     throw err;
   }
+}
+
+async function writeVerifiedRunCheckpoint(paths: RunPaths, run: RunConfig, ledger: Ledger): Promise<void> {
+  await refreshRunReceipt(paths, run);
+  const verification = await verifyCurrentRunReceipt(paths.workspace);
+  if (!verification.ok) {
+    throw new Error(`new run receipt failed verification: ${verification.issues.map((issue) => issue.code).join(", ")}`);
+  }
+  await writeText(paths.readme, await renderRunReadme(paths, run, ledger, { receiptVerification: verification }));
 }
 
 // ---------------------------------------------------------------------------

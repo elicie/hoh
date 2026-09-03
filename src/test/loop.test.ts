@@ -7,6 +7,7 @@ import { createDemoMockHarness, MockHarness } from "../harness/mock.js";
 import { MAX_INLINE_CANDIDATE_DIFF_BYTES } from "../runtime/candidate-diff.js";
 import { git, gitLog, headCommit } from "../runtime/git.js";
 import { normalizeEvidence, runHoh } from "../runtime/loop.js";
+import { verifyCurrentRunReceipt } from "../runtime/run-receipt.js";
 import { ExecutionRecordSchema } from "../runtime/schemas.js";
 import { readJson, RunPaths } from "../runtime/state.js";
 import type { CheckResult, ClaimCatalog, DeveloperRecord, EvidenceBundle, EvidenceSubmission, Ledger } from "../types.js";
@@ -430,6 +431,9 @@ test("planner without structured output is retried once, then the loop fails", a
     assert.match(harness.calls[1].prompt, /Runtime notice/);
     const paths = new RunPaths(ws);
     assert.ok(await exists(paths.errorJson(1)));
+    const receipt = await verifyCurrentRunReceipt(ws);
+    assert.equal(receipt.ok, true, JSON.stringify(receipt.issues));
+    assert.ok(receipt.receipt?.artifacts.some((artifact) => artifact.path === ".hoh/iterations/loop-01/error.json"));
   } finally {
     await cleanup();
   }

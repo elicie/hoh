@@ -52,6 +52,10 @@ export class RunPaths {
   get budget() {
     return path.join(this.root, "budget.json");
   }
+  /** Canonical offline-verifiable receipt for the current durable run state. */
+  get receipt() {
+    return path.join(this.root, "receipt.json");
+  }
   get claims() {
     return path.join(this.root, "claims.json");
   }

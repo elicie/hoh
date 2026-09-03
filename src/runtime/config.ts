@@ -286,15 +286,24 @@ export function validateConfig(c: HohConfig): string[] {
     errors.push(`harness must be "pi", "codex", or "mock", got ${JSON.stringify(c.harness)}`);
   }
   if (!Number.isInteger(c.loops) || c.loops < 1) errors.push(`loops must be a positive integer, got ${JSON.stringify(c.loops)}`);
-  if (typeof c.artifact_dir !== "string" || !c.artifact_dir || path.isAbsolute(c.artifact_dir) || /[\0\r\n]/.test(c.artifact_dir)) {
-    errors.push(`artifact_dir must be a relative path inside the workspace, got ${JSON.stringify(c.artifact_dir)}`);
+  if (
+    typeof c.artifact_dir !== "string" ||
+    !c.artifact_dir ||
+    path.isAbsolute(c.artifact_dir) ||
+    path.posix.isAbsolute(c.artifact_dir) ||
+    path.win32.isAbsolute(c.artifact_dir) ||
+    /[\\\0\r\n]/.test(c.artifact_dir)
+  ) {
+    errors.push(`artifact_dir must be a canonical POSIX-style relative path inside the workspace, got ${JSON.stringify(c.artifact_dir)}`);
   } else {
-    const normalizedArtifact = path.normalize(c.artifact_dir);
+    const normalizedArtifact = path.posix.normalize(c.artifact_dir);
     if (
+      normalizedArtifact !== c.artifact_dir ||
+      (c.artifact_dir !== "." && c.artifact_dir.endsWith("/")) ||
       normalizedArtifact === ".." ||
-      normalizedArtifact.startsWith(`..${path.sep}`) ||
+      normalizedArtifact.startsWith("../") ||
       normalizedArtifact === ".hoh" ||
-      normalizedArtifact.startsWith(`.hoh${path.sep}`)
+      normalizedArtifact.startsWith(".hoh/")
     ) {
       errors.push(`artifact_dir must stay inside the workspace and outside runtime-owned .hoh, got ${JSON.stringify(c.artifact_dir)}`);
     }
