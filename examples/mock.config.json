@@ -1,0 +1,6 @@
+{
+  "harness": "mock",
+  "loops": 2,
+  "artifact_dir": ".",
+  "checks": [{ "name": "files", "command": "ls *.txt" }]
+}

@@ -1,0 +1,142 @@
+/**
+ * Scripted harness for tests and dry runs. No model is involved: each role is
+ * a function that may read/write its working directory and submit structured
+ * output, exactly the way a real harness would through tools.
+ */
+import { mkdir, readFile, writeFile } from "node:fs/promises";
+import path from "node:path";
+import type { Role } from "../types.js";
+import type { Harness, RoleInvocation, RoleResult } from "./types.js";
+import { emptyUsage } from "./types.js";
+
+export interface MockApi {
+  submit(tool: string, payload: unknown): void;
+  write(relPath: string, content: string): Promise<void>;
+  read(relPath: string): Promise<string | null>;
+  exists(relPath: string): Promise<boolean>;
+}
+
+export type MockScript = (inv: RoleInvocation, api: MockApi) => Promise<string | void> | string | void;
+
+export class MockHarness implements Harness {
+  readonly name = "mock";
+  readonly calls: { role: Role; loopIndex: number; prompt: string; model?: string }[] = [];
+
+  constructor(private readonly scripts: Partial<Record<Role, MockScript>>) {}
+
+  async invoke(inv: RoleInvocation): Promise<RoleResult> {
+    this.calls.push({ role: inv.role, loopIndex: inv.loopIndex, prompt: inv.prompt, model: inv.model });
+    const submissions: Record<string, unknown[]> = {};
+    const api: MockApi = {
+      submit: (tool, payload) => {
+        (submissions[tool] ??= []).push(payload);
+      },
+      write: async (rel, content) => {
+        const file = path.resolve(inv.cwd, rel);
+        await mkdir(path.dirname(file), { recursive: true });
+        await writeFile(file, content);
+      },
+      read: async (rel) => {
+        try {
+          return await readFile(path.resolve(inv.cwd, rel), "utf8");
+        } catch {
+          return null;
+        }
+      },
+      exists: async (rel) => {
+        try {
+          await readFile(path.resolve(inv.cwd, rel));
+          return true;
+        } catch {
+          return false;
+        }
+      },
+    };
+    const text = (await this.scripts[inv.role]?.(inv, api)) ?? "";
+    if (inv.transcriptPath) {
+      await mkdir(path.dirname(inv.transcriptPath), { recursive: true });
+      await writeFile(
+        inv.transcriptPath,
+        `${JSON.stringify({ ts: new Date().toISOString(), type: "mock_invocation", role: inv.role, loop: inv.loopIndex, systemPrompt: inv.systemPrompt, prompt: inv.prompt, finalText: text, submissions })}\n`,
+        { flag: "a" },
+      );
+    }
+    return { finalText: text, submissions, usage: emptyUsage(), turns: 1, model: inv.model ? `mock:${inv.model}` : "mock" };
+  }
+}
+
+/**
+ * A deterministic demo: a tiny "artifact" (text files) that takes two loops to
+ * reach QA PASS. Loop 1 leaves a gap (`result_state`), loop 2 closes it.
+ */
+export function createDemoMockHarness(): MockHarness {
+  return new MockHarness({
+    planner: (inv, api) => {
+      const t = inv.loopIndex;
+      api.submit("submit_development_document", {
+        objective: t === 1 ? "Bootstrap a launchable artifact with a visible player control loop" : "Repair the missing result state and preserve player control",
+        priorities:
+          t === 1
+            ? [
+                { name: "Launchable entry", action: "Create main.txt describing the entry point", observable_outcome: "main.txt exists and names the entry scene" },
+                { name: "Player control", action: "Create player_control.txt", observable_outcome: "player_control.txt lists left/right handling" },
+              ]
+            : [{ name: "Result state", action: "Create result_state.txt", observable_outcome: "result_state.txt describes the visible completion screen" }],
+        preservation_gate: t === 1 ? [] : ["player_control remains present"],
+        acceptance_gate: ["All files named in the priorities exist with non-empty content"],
+      });
+      return "Plan submitted.";
+    },
+    developer: async (inv, api) => {
+      const t = inv.loopIndex;
+      await api.write("main.txt", `entry scene: Main (loop ${t})\n`);
+      await api.write("player_control.txt", "left/right input moves the avatar\n");
+      if (t >= 2) await api.write("result_state.txt", "completing the objective shows a result screen\n");
+      return `Loop ${t}: wrote main.txt, player_control.txt${t >= 2 ? ", result_state.txt" : ""}.`;
+    },
+    tester: async (inv, api) => {
+      const hasPlayerControl = await api.exists("player_control.txt");
+      const hasResult = await api.exists("result_state.txt");
+      const verified = hasPlayerControl
+        ? [
+            {
+              claim_id: "player_control",
+              claim: "The player-control contract passes its scripted check.",
+              execution_records: [{ type: "check", path: "mock:file-exists:player_control.txt", observation: "scripted file check passed" }],
+            },
+          ]
+        : [];
+      const gaps = hasResult
+        ? []
+        : [
+            {
+              claim_id: "result_state",
+              claim: "Completing the objective produces a visible result.",
+              execution_records: [{ type: "source", path: "result_state.txt", observation: "file is missing" }],
+              severity: "major",
+              player_impact: "Completion is not visible to the player.",
+              recommended_update: "Add a result state.",
+            },
+          ];
+      if (hasResult) {
+        verified.push({
+          claim_id: "result_state",
+          claim: "The result-state contract passes its scripted check.",
+          execution_records: [{ type: "check", path: "mock:file-exists:result_state.txt", observation: "scripted file check passed" }],
+        });
+      }
+      api.submit("submit_evidence", {
+        qa_status: gaps.length ? "partial" : "pass",
+        summary: gaps.length ? "Player control verified; result state missing." : "Player control and result state verified.",
+        verified_records: verified,
+        gap_records: gaps,
+        planner_handoff: {
+          preservation_constraints: ["Preserve verified player movement."],
+          update_targets: gaps.length ? ["Implement a visible completion state."] : [],
+          validation_requirements: ["Check that every priority file exists."],
+        },
+      });
+      return "Evidence submitted.";
+    },
+  });
+}

@@ -1,0 +1,28 @@
+{
+  "harness": "pi",
+  "providers": {
+    "gateway": {
+      "base_url": "$GATEWAY_BASE_URL",
+      "api_key": "$GATEWAY_API_KEY",
+      "api": "openai-completions",
+      "models": "discover",
+      "model_defaults": { "context_window": 128000, "max_tokens": 16384, "reasoning": false },
+      "model_overrides": { "gpt-5.5": { "reasoning": true, "context_window": 400000 } }
+    },
+    "ollama": {
+      "base_url": "http://localhost:11434/v1",
+      "api_key": "ollama",
+      "models": ["qwen3-coder:30b", { "id": "glm-5:9b", "context_window": 64000 }],
+      "compat": { "supports_developer_role": false, "supports_reasoning_effort": false }
+    }
+  },
+  "models": {
+    "default": "gateway/gpt-5.5:high",
+    "tester": "ollama/qwen3-coder:30b"
+  },
+  "loops": 3,
+  "artifact_dir": ".",
+  "checks": [],
+  "timeouts": { "role_min": 60, "check_min": 10 },
+  "pi": {}
+}

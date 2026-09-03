@@ -1,0 +1,23 @@
+{
+  "name": "hoh",
+  "version": "0.1.0",
+  "description": "Harness-of-Harness: planner/developer/tester loop runtime on top of the pi coding agent",
+  "type": "module",
+  "license": "MIT",
+  "bin": {
+    "hoh": "dist/cli.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "npm run build && node --test \"dist/test/**/*.test.js\"",
+    "hoh": "node dist/cli.js"
+  },
+  "dependencies": {
+    "@earendil-works/pi-ai": "^0.84.4",
+    "@earendil-works/pi-coding-agent": "^0.84.4"
+  },
+  "devDependencies": {
+    "@types/node": "^26.4.1",
+    "typescript": "^7.0.2"
+  }
+}

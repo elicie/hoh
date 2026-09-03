@@ -1,0 +1,52 @@
+{
+  "source": {
+    "run_id": "20260903-1de3ce",
+    "loop_index": 3,
+    "evidence_sha256": "a09ef9b1f7c1e583dc88618a89626e630eca79952f6b35bdd42e3c381c418305",
+    "derivation": "selected-record projection from original evidence; status fields removed for submission replay"
+  },
+  "submission": {
+    "qa_status": "pass",
+    "summary": "Selected loop 3 claims replayed with their recorded execution evidence.",
+    "verified_records": [
+      {
+        "claim_id": "enemy_type_count",
+        "claim": "The five existing enemy types and varied wave set are preserved: `small`, `zig`, `gun`, `tank`, and blue `ace`, with non-identical wave patterns.",
+        "execution_records": [
+          {
+            "type": "source",
+            "path": "game/index.html lines 328-430 and 775-802",
+            "observation": "`spawnEnemy` defines distinct stats and movement/firing branches for small, zig, ace, gun, and tank; `spawnWave` cycles seven different wave patterns including 5- and 6-plane formations; rendering branches include a blue ace sprite."
+          },
+          {
+            "type": "test",
+            "path": "10-second play sample",
+            "observation": "Normal play spawned varied enemies over time: enemyCount changed from 0 to 8+, score changed as enemies were killed, and no runtime errors occurred during wave spawning."
+          }
+        ]
+      },
+      {
+        "claim_id": "pickup_medal_and_bomb_cap",
+        "claim": "Medal and bomb pickup scoring/cap behavior and the HUD bomb-icon limit are preserved.",
+        "execution_records": [
+          {
+            "type": "source",
+            "path": "game/index.html lines 615-622 and 943-945",
+            "observation": "`MAX_BOMBS` is 5; bomb pickups increment bombs only below the cap, otherwise award `BOMB MAX +700`; medal pickups award `MEDAL +1000`; HUD renders bomb icons with `Math.min(bombs, MAX_BOMBS)`."
+          },
+          {
+            "type": "runtime_trace",
+            "path": "custom mobile smoke",
+            "observation": "Bomb use path visibly respected carried count: debug bombs decreased from 3 to 2 after tapping the BOMB button and the on-screen button screenshot showed `x2`."
+          }
+        ]
+      }
+    ],
+    "gap_records": [],
+    "planner_handoff": {
+      "preservation_constraints": [],
+      "update_targets": [],
+      "validation_requirements": []
+    }
+  }
+}
