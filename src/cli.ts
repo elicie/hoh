@@ -3,6 +3,7 @@
  * hoh — Harness-of-Harness runtime CLI
  *
  *   hoh run    --workspace <dir> --spec <PRD.md> [--config <file>] [--loops <n>]
+ *   hoh init-claims --workspace <dir> --spec <PRD.md> [--config <file>]
  *   hoh status --workspace <dir>
  *   hoh config --workspace <dir> [--config <file>]
  *
@@ -15,6 +16,7 @@ import path from "node:path";
 import { parseArgs } from "node:util";
 import { resolveCliModel } from "@earendil-works/pi-coding-agent";
 import { createHarness, createModelRuntime } from "./harness/factory.js";
+import { initializeClaimState } from "./runtime/claims.js";
 import {
   CONFIG_FILE_NAME,
   type ConfigPatch,
@@ -28,6 +30,8 @@ import {
 } from "./runtime/config.js";
 import { ledgerSummary } from "./runtime/ledger.js";
 import { runHoh } from "./runtime/loop.js";
+import { coverageSummary, loadClaimCatalog, loadCoverage } from "./runtime/coverage.js";
+import { commitAll, ensureRepo, RUNTIME_IDENTITY } from "./runtime/git.js";
 import { collectLoops } from "./runtime/report.js";
 import { loadLedger, loadRun, readJson, RunPaths } from "./runtime/state.js";
 import { ROLES } from "./types.js";
@@ -36,6 +40,7 @@ const USAGE = `hoh — Harness-of-Harness runtime on top of the pi coding agent
 
 Usage:
   hoh run    --workspace <dir> --spec <PRD.md> [--config <file>] [--loops <n>]
+  hoh init-claims --workspace <dir> --spec <PRD.md> [--config <file>]
   hoh status --workspace <dir>
   hoh config --workspace <dir> [--config <file>]      effective config, discovered models, per-role resolution
 
@@ -143,10 +148,17 @@ async function showStatus(workspace: string): Promise<number> {
   }
   const ledger = await loadLedger(paths);
   const s = ledgerSummary(ledger);
+  const spec = await readFile(paths.spec, "utf8");
+  const catalog = await loadClaimCatalog(paths, spec);
+  const coverage = catalog ? await loadCoverage(paths, catalog) : null;
   const loops = await collectLoops(paths);
   const models = ROLES.map((r) => `${r}=${modelForRole(run.config, r) ?? "(harness default)"}`).join(", ");
   process.stdout.write(`Run ${run.run_id} — harness ${run.config.harness}, budget ${run.config.loops} loops\nModels: ${models}\n`);
   process.stdout.write(`Ledger: open ${s.open}, regressed ${s.regressed}, closed ${s.closed}, all ${s.all}\n\n`);
+  if (catalog && coverage) {
+    const c = coverageSummary(catalog, coverage);
+    process.stdout.write(`Coverage: verified ${c.verified}, untested ${c.untested}, gap ${c.gap}, all ${c.all}\n\n`);
+  }
   process.stdout.write("Loop  Candidate            QA        Verified/Gaps  Objective\n");
   for (const l of [...loops].reverse()) {
     const qa = l.evidence ? l.evidence.qa_status.toUpperCase() : l.error ? "ERROR" : "UNTESTED";
@@ -182,6 +194,32 @@ async function main(argv: string[]): Promise<number> {
   loadEnvFiles(workspace, log);
   const r = await resolve(values);
   if (cmd === "config") return showConfig(r, log);
+  if (cmd === "init-claims") {
+    if (!values.spec) throw new Error("--spec is required for init-claims");
+    const specPath = path.resolve(values.spec);
+    const spec = await readFile(specPath, "utf8");
+    await ensureRepo(r.workspace);
+    const harness = await createHarness(r.effective, r.workspace, { log });
+    const paths = new RunPaths(r.workspace);
+    const state = await initializeClaimState({
+      workspace: r.workspace,
+      specPath,
+      spec,
+      harness,
+      paths,
+      model: modelForRole(r.effective, "planner"),
+      timeoutMs: r.effective.timeouts.role_min * 60_000,
+    });
+    await commitAll(r.workspace, "chore(hoh): initialize fixed PRD claims", RUNTIME_IDENTITY, [
+      ".hoh/claims.json",
+      ".hoh/coverage.json",
+      ".hoh/claims-transcript.jsonl",
+    ]);
+    process.stdout.write(
+      `Initialized ${state.catalog.claims.length} fixed claim(s) in ${paths.claims}\nReview the catalog's completeness and required evidence types before running.\n`,
+    );
+    return 0;
+  }
   if (cmd !== "run") {
     process.stderr.write(`Unknown command "${cmd}"\n\n${USAGE}`);
     return 1;

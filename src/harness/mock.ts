@@ -72,6 +72,16 @@ export class MockHarness implements Harness {
 export function createDemoMockHarness(): MockHarness {
   return new MockHarness({
     planner: (inv, api) => {
+      if (inv.structuredTools.some((tool) => tool.name === "submit_claims")) {
+        api.submit("submit_claims", {
+          claims: [
+            { id: "main_entry", criterion: "main.txt names the entry scene.", requires: ["check"] },
+            { id: "player_control", criterion: "player_control.txt describes left/right input handling.", requires: ["check"] },
+            { id: "result_state", criterion: "result_state.txt describes the visible completion screen.", requires: ["check"] },
+          ],
+        });
+        return "Claim catalog submitted.";
+      }
       const t = inv.loopIndex;
       api.submit("submit_development_document", {
         objective: t === 1 ? "Bootstrap a launchable artifact with a visible player control loop" : "Repair the missing result state and preserve player control",
@@ -95,17 +105,24 @@ export function createDemoMockHarness(): MockHarness {
       return `Loop ${t}: wrote main.txt, player_control.txt${t >= 2 ? ", result_state.txt" : ""}.`;
     },
     tester: async (inv, api) => {
+      const hasMain = await api.exists("main.txt");
       const hasPlayerControl = await api.exists("player_control.txt");
       const hasResult = await api.exists("result_state.txt");
-      const verified = hasPlayerControl
-        ? [
-            {
-              claim_id: "player_control",
-              claim: "The player-control contract passes its scripted check.",
-              execution_records: [{ type: "check", path: "mock:file-exists:player_control.txt", observation: "scripted file check passed" }],
-            },
-          ]
-        : [];
+      const verified: Array<{ claim_id: string; claim: string; execution_records: Array<{ type: string; path: string; observation: string }> }> = [];
+      if (hasMain) {
+        verified.push({
+          claim_id: "main_entry",
+          claim: "The main-entry contract passes its scripted check.",
+          execution_records: [{ type: "check", path: "mock:file-exists:main.txt", observation: "scripted file check passed" }],
+        });
+      }
+      if (hasPlayerControl) {
+        verified.push({
+          claim_id: "player_control",
+          claim: "The player-control contract passes its scripted check.",
+          execution_records: [{ type: "check", path: "mock:file-exists:player_control.txt", observation: "scripted file check passed" }],
+        });
+      }
       const gaps = hasResult
         ? []
         : [

@@ -19,7 +19,9 @@ import type { Harness, RoleInvocation, RoleResult } from "../harness/types.js";
 import { CODING_TOOLS, INSPECT_TOOLS, READ_ONLY_TOOLS, emptyUsage } from "../harness/types.js";
 import type {
   CheckResult,
+  ClaimCatalog,
   ClaimRecord,
+  CoverageState,
   DeveloperRecord,
   EvidenceBundle,
   EvidenceSubmission,
@@ -30,8 +32,12 @@ import type {
   RoleUsage,
   RunConfig,
 } from "../types.js";
+import { EXECUTION_EVIDENCE_TYPES } from "../types.js";
 import { runCheck, runChecks } from "./checks.js";
+import { ensureClaimState } from "./claims.js";
 import { assertValidConfig, type ConfigPatch, DEFAULT_CONFIG, type HohConfig, mergeConfig, modelForRole } from "./config.js";
+import { claimCatalogSha256, rebuildCoverage } from "./coverage.js";
+import { bindEvidenceFiles, prepareEvidenceDirectory, sanitizeEvidenceDirectory } from "./evidence-files.js";
 import {
   artifactTreeHash,
   changedPaths,
@@ -90,6 +96,8 @@ interface Ctx {
   config: HohConfig;
   harness: Harness;
   log: Logger;
+  claimCatalog: ClaimCatalog;
+  coverage: CoverageState;
 }
 
 export async function runHoh(opts: RunOptions): Promise<RunResult> {
@@ -110,6 +118,7 @@ export async function runHoh(opts: RunOptions): Promise<RunResult> {
   assertValidConfig(config, configSource);
 
   let run = await loadRun(paths);
+  let initialized = false;
   if (!run) {
     if (!opts.specPath) throw new Error("A specification file (--spec) is required to start a new run.");
     run = {
@@ -125,17 +134,34 @@ export async function runHoh(opts: RunOptions): Promise<RunResult> {
     await writeJson(paths.config, config);
     await writeJson(paths.runJson, run);
     await writeJson(paths.ledger, emptyLedger());
-    await writeText(paths.readme, await renderRunReadme(paths, run, emptyLedger()));
-    await commitAll(ws, `chore(hoh): initialize run ${run.run_id}`, RUNTIME_IDENTITY, ["."]);
-    log(`initialized run ${run.run_id} in ${ws} (config: ${configSource})`);
+    initialized = true;
   } else {
     const changed = JSON.stringify(run.config) !== JSON.stringify(config);
     run.config = config;
     run.config_source = configSource;
     await writeJson(paths.config, config);
     await writeJson(paths.runJson, run);
-    if (changed) await commitAll(ws, `chore(hoh): update configuration (${configSource})`, RUNTIME_IDENTITY, [".hoh"]);
+    if (changed) {
+      await commitAll(ws, `chore(hoh): update configuration (${configSource})`, RUNTIME_IDENTITY, [paths.rel(paths.config), paths.rel(paths.runJson)]);
+    }
     log(`resuming run ${run.run_id}${changed ? " with updated configuration" : ""}`);
+  }
+  const spec = await readFile(paths.spec, "utf8");
+  const claimState = await ensureClaimState({
+    workspace: ws,
+    specPath: run.spec_path,
+    spec,
+    harness: opts.harness,
+    paths,
+    model: modelForRole(config, "planner"),
+    timeoutMs: config.timeouts.role_min * 60_000,
+  });
+  await writeText(paths.readme, await renderRunReadme(paths, run, await loadLedger(paths)));
+  if (initialized) {
+    await commitAll(ws, `chore(hoh): initialize run ${run.run_id}`, RUNTIME_IDENTITY, ["."]);
+    log(`initialized run ${run.run_id} in ${ws} (config: ${configSource})`);
+  } else if (claimState.created) {
+    log(`generated ${claimState.catalog.claims.length} fixed PRD claim(s)`);
   }
   log(
     `models: ${(["planner", "developer", "tester"] as const).map((r) => `${r}=${modelForRole(config, r) ?? "(harness default)"}`).join(", ")}; budget ${config.loops} loops`,
@@ -150,7 +176,7 @@ export async function runHoh(opts: RunOptions): Promise<RunResult> {
   process.env.HOH_RUN_ID = run.run_id;
   await git(["worktree", "prune"], ws, { allowFail: true });
 
-  const ctx: Ctx = { ws, paths, run, config, harness: opts.harness, log };
+  const ctx: Ctx = { ws, paths, run, config, harness: opts.harness, log, claimCatalog: claimState.catalog, coverage: claimState.coverage };
   const done = await lastCompletedLoop(paths);
   const results: LoopResult[] = [];
   for (let t = done + 1; t <= config.loops; t++) {
@@ -206,6 +232,8 @@ export async function runLoop(ctx: Ctx, t: number): Promise<LoopResult> {
       previousEvidence,
       previousChecks,
       ledger,
+      claimCatalog: ctx.claimCatalog,
+      coverage: ctx.coverage,
     });
     const plannerRun = await invokeRole(
       ctx,
@@ -331,16 +359,40 @@ export async function runLoop(ctx: Ctx, t: number): Promise<LoopResult> {
     process.env.HOH_ROLE = "tester";
     const candidateCommit = (await headCommit(ws))!;
     const wt = await mkdtemp(path.join(os.tmpdir(), `hoh-${run.run_id}-loop-${pad(t)}-`));
+    const evidenceDir = paths.evidenceDir(t);
+    await prepareEvidenceDirectory(evidenceDir);
     let evidence: EvidenceBundle;
+    let evidenceBound = false;
     try {
       await worktreeAdd(ws, candidateCommit, wt);
       const wtArtifact = path.resolve(wt, artifactDir);
       await mkdir(wtArtifact, { recursive: true });
-      const checkEnv = { HOH_WORKSPACE: ws, HOH_CANDIDATE_DIR: wt, HOH_RUN_ID: run.run_id, HOH_LOOP: String(t), HOH_ROLE: "check" };
+      const candidateBeforeChecks = await artifactTreeHash(wt, { subdir: artifactDir });
+      if (candidateBeforeChecks !== developer.candidate_tree_sha) {
+        throw new Error(
+          `candidate worktree ${candidateBeforeChecks.slice(0, 12)} differs from recorded candidate ${developer.candidate_tree_sha.slice(0, 12)} before checks`,
+        );
+      }
+      const checkEnv = {
+        HOH_WORKSPACE: ws,
+        HOH_CANDIDATE_DIR: wt,
+        HOH_EVIDENCE_DIR: evidenceDir,
+        HOH_RUN_ID: run.run_id,
+        HOH_LOOP: String(t),
+        HOH_ROLE: "check",
+      };
       log(`${tag} runtime: ${config.checks.length} deterministic check(s) on frozen candidate${config.worktree_setup ? " (with worktree setup)" : ""}`);
       const checks: CheckResult[] = [];
       if (config.worktree_setup) {
-        checks.push(await runCheck({ name: "setup", command: config.worktree_setup }, wt, config.timeouts.check_min * 60_000, checkEnv));
+        checks.push(
+          await runCheck(
+            { name: "setup", command: config.worktree_setup },
+            wt,
+            config.timeouts.check_min * 60_000,
+            checkEnv,
+            { directory: evidenceDir, basename: "00-setup" },
+          ),
+        );
       }
       checks.push(...(await runChecks(config.checks, wtArtifact, config.timeouts.check_min * 60_000, checkEnv)));
       for (const c of checks) {
@@ -348,8 +400,16 @@ export async function runLoop(ctx: Ctx, t: number): Promise<LoopResult> {
         log(`${tag} check ${c.name}: ${c.status} (${(c.duration_ms / 1000).toFixed(1)}s)${c.status === "pass" ? "" : ` — ${lastLine.slice(0, 160)}`}`);
       }
       process.env.HOH_CANDIDATE_DIR = wt;
+      process.env.HOH_EVIDENCE_DIR = evidenceDir;
       await writeJson(paths.checksJson(t), checks);
       const before = await artifactTreeHash(wt, { subdir: artifactDir });
+      await git(["add", "-f", "--", paths.rel(evidenceDir)], ws, { allowFail: true });
+      await commitAll(
+        ws,
+        `chore(loop-${pad(t)}): freeze deterministic check records`,
+        RUNTIME_IDENTITY,
+        [paths.rel(paths.developerJson(t)), paths.rel(paths.transcript(t, "developer")), paths.rel(paths.checksJson(t)), paths.rel(evidenceDir)],
+      );
 
       log(`${tag} tester: start`);
       const testerPrompts = await renderTesterPrompts({
@@ -363,6 +423,8 @@ export async function runLoop(ctx: Ctx, t: number): Promise<LoopResult> {
         developmentDocument,
         checks,
         ledger,
+        claimCatalog: ctx.claimCatalog,
+        coverage: ctx.coverage,
       });
       const testerRun = await invokeRole(
         ctx,
@@ -382,37 +444,74 @@ export async function runLoop(ctx: Ctx, t: number): Promise<LoopResult> {
       );
       const after = await artifactTreeHash(wt, { subdir: artifactDir });
       // The Tester works in the worktree, but bash could still reach the main workspace by absolute path.
-      // Runtime records under .hoh are owned by the runtime (this loop's records are still uncommitted here), so exclude them.
       const testerGuardSpec = [".", ":(exclude).hoh"];
       const testerWorkspaceChanges = await pathsChanged(ws, testerGuardSpec);
       if (testerWorkspaceChanges.length) {
         log(`${tag} tester: WARNING main workspace changed during QA (${testerWorkspaceChanges.length} paths); reverting`);
         await restorePaths(ws, testerGuardSpec);
       }
+      const evidenceRel = paths.rel(evidenceDir).replaceAll(path.sep, "/");
+      const immutableCheckRel = `${evidenceRel}/checks/`;
+      const testerTranscriptRel = paths.rel(paths.transcript(t, "tester")).replaceAll(path.sep, "/");
+      const testerRuntimeChanges = (await pathsChanged(ws, [".hoh"], { includeIgnored: true })).filter((changed) => {
+        const rel = changed.replaceAll(path.sep, "/");
+        if (rel === testerTranscriptRel) return false;
+        if (rel.startsWith(`${evidenceRel}/`) && !rel.startsWith(immutableCheckRel)) return false;
+        return true;
+      });
+      if (testerRuntimeChanges.length) {
+        log(`${tag} tester: WARNING runtime records changed outside the evidence area (${testerRuntimeChanges.length} paths); reverting`);
+        await restorePaths(
+          ws,
+          testerRuntimeChanges.map((changed) => `:(literal)${changed}`),
+          { includeIgnored: true },
+        );
+      }
+      const testerViolations = [...testerWorkspaceChanges, ...testerRuntimeChanges];
       const submission =
         lastSubmission<EvidenceSubmission>(testerRun.result, SUBMIT_EVIDENCE_TOOL) ?? parseJsonBlock<EvidenceSubmission>(testerRun.result.finalText);
-      evidence = normalizeEvidence({
-        submission,
-        loopIndex: t,
-        candidateId,
-        checks,
-        before,
-        after,
-        finalText: testerRun.result.finalText,
-        usage: testerRun.usage,
-        attempts: testerRun.attempts,
-        workspaceViolations: testerWorkspaceChanges,
-      });
+      evidence = await bindEvidenceFiles(
+        normalizeEvidence({
+          submission,
+          loopIndex: t,
+          candidateId,
+          checks,
+          before,
+          after,
+          finalText: testerRun.result.finalText,
+          usage: testerRun.usage,
+          attempts: testerRun.attempts,
+          workspaceViolations: testerViolations,
+          claimCatalog: ctx.claimCatalog,
+          expectedCandidateSha: developer.candidate_tree_sha,
+        }),
+        evidenceDir,
+        ctx.claimCatalog,
+      );
+      evidenceBound = true;
     } finally {
-      await worktreeRemove(ws, wt);
+      try {
+        if (!evidenceBound) {
+          const notes = await sanitizeEvidenceDirectory(evidenceDir);
+          for (const note of notes) log(`${tag} runtime: ${note}`);
+        }
+      } finally {
+        await worktreeRemove(ws, wt);
+        delete process.env.HOH_CANDIDATE_DIR;
+        delete process.env.HOH_EVIDENCE_DIR;
+      }
     }
 
     const delta = applyEvidence(ledger, evidence);
     await rm(paths.errorJson(t), { force: true }); // a previous failed attempt of this loop is superseded
     await writeJson(paths.ledger, ledger);
+    await writeJson(paths.checksJson(t), evidence.checks);
     await writeJson(paths.evidenceJson(t), evidence);
+    ctx.coverage = await rebuildCoverage(paths, ctx.claimCatalog);
+    await writeJson(paths.coverage, ctx.coverage);
     await writeText(paths.testerReport(t), renderTesterReport(evidence));
     await writeText(paths.readme, await renderRunReadme(paths, run, ledger));
+    await git(["add", "-f", "--", paths.rel(evidenceDir)], ws, { allowFail: true });
     await commitAll(ws, `test(loop-${pad(t)}): QA ${evidence.qa_status} for ${candidateId}`, ROLE_IDENTITY.tester, [".hoh"]);
     log(
       `${tag} tester: ${evidence.qa_status.toUpperCase()} — verified ${evidence.verified_records.length}, gaps ${evidence.gap_records.length}` +
@@ -511,10 +610,14 @@ interface NormalizeInput {
   attempts: number;
   /** paths in the main workspace touched during QA (reverted by the runtime) */
   workspaceViolations?: string[];
+  claimCatalog?: ClaimCatalog;
+  /** Recorded candidate tree before checks; any post-check mismatch invalidates QA. */
+  expectedCandidateSha?: string;
 }
 
 export function normalizeEvidence(input: NormalizeInput): EvidenceBundle {
-  const executionEvidenceTypes = new Set(["run", "test", "check", "screenshot", "replay", "runtime_trace", "log", "storage"]);
+  const executionEvidenceTypes = new Set<string>(EXECUTION_EVIDENCE_TYPES);
+  const fixedClaims = new Map(input.claimCatalog?.claims.map((claim) => [claim.id, claim]) ?? []);
   const notes: string[] = [];
   const frozen = input.before === input.after;
   let sub = input.submission;
@@ -566,27 +669,38 @@ export function normalizeEvidence(input: NormalizeInput): EvidenceBundle {
   });
   const verified: ClaimRecord[] = [];
   for (const record of verifiedCandidates) {
-    if (record.execution_records.some((e) => executionEvidenceTypes.has(e.type))) {
-      verified.push(record);
+    const observedTypes = new Set(record.execution_records.map((e) => e.type));
+    if (!record.execution_records.some((e) => executionEvidenceTypes.has(e.type))) {
+      gaps.push({ ...record, status: "gap", severity: "minor" });
+      gapIds.add(record.claim_id);
+      notes.push(`claim ${record.claim_id}: source-only evidence downgraded to gap`);
       continue;
     }
-    gaps.push({ ...record, status: "gap", severity: "minor" });
-    gapIds.add(record.claim_id);
-    notes.push(`claim ${record.claim_id}: source-only evidence downgraded to gap`);
+    const missing = (fixedClaims.get(record.claim_id)?.requires ?? []).filter((type) => !observedTypes.has(type));
+    if (missing.length) {
+      gaps.push({ ...record, status: "gap", severity: "minor" });
+      gapIds.add(record.claim_id);
+      notes.push(`claim ${record.claim_id}: missing required evidence types: ${missing.join(", ")}`);
+      continue;
+    }
+    verified.push(record);
   }
 
   for (const c of input.checks) {
     if (c.status === "pass") continue;
     const id = `check.${c.name}`;
+    const outputPath = c.stderr_tail ? c.stderr_path : c.stdout_path;
+    const outputSha256 = c.stderr_tail ? c.stderr_sha256 : c.stdout_sha256;
     const executionRecord = {
       type: "check",
-      path: c.name,
+      path: outputPath ?? c.name,
+      ...(outputSha256 ? { sha256: outputSha256 } : {}),
       observation: `${c.status}, exit ${c.exit_code ?? "-"}: ${(c.stderr_tail || c.stdout_tail).trim().slice(-500)}`,
     };
     const recommendedUpdate = `Make "${c.command}" succeed on the artifact.`;
     const existingGap = gaps.find((gap) => gap.claim_id === id);
     if (existingGap) {
-      if (!existingGap.execution_records.some((record) => record.type === "check" && record.path === c.name)) {
+      if (!existingGap.execution_records.some((record) => record.type === "check" && record.path === executionRecord.path)) {
         existingGap.execution_records.push(executionRecord);
       }
       existingGap.severity = "blocker";
@@ -613,6 +727,25 @@ export function normalizeEvidence(input: NormalizeInput): EvidenceBundle {
       status: "gap",
       severity: "blocker",
       recommended_update: "QA must only build, run, and inspect; it must not edit files.",
+    });
+  }
+
+  if (input.expectedCandidateSha && input.before !== input.expectedCandidateSha) {
+    notes.push(
+      `candidate mutated during deterministic checks (tree ${input.expectedCandidateSha.slice(0, 12)} → ${input.before.slice(0, 12)})`,
+    );
+    gaps.push({
+      claim_id: "runtime.candidate_mutated_by_checks",
+      claim: "Deterministic checks leave the frozen candidate source tree unchanged.",
+      execution_records: [
+        {
+          type: "runtime_trace",
+          observation: `artifact tree changed during checks: ${input.expectedCandidateSha} → ${input.before}`,
+        },
+      ],
+      status: "gap",
+      severity: "blocker",
+      recommended_update: "Checks and worktree_setup must not modify tracked candidate source files.",
     });
   }
 
@@ -645,6 +778,7 @@ export function normalizeEvidence(input: NormalizeInput): EvidenceBundle {
     schema_version: 1,
     loop_index: input.loopIndex,
     candidate_id: input.candidateId,
+    claim_catalog_sha256: input.claimCatalog ? claimCatalogSha256(input.claimCatalog) : null,
     qa_status,
     summary: String(sub.summary ?? "").trim(),
     verified_records: resolvedVerified,

@@ -15,10 +15,19 @@ export const ROLES: readonly Role[] = ["planner", "developer", "tester"];
 // Evidence (E_t)
 // ---------------------------------------------------------------------------
 
+export const EXECUTION_EVIDENCE_TYPES = ["run", "test", "check", "screenshot", "replay", "runtime_trace", "log", "storage"] as const;
+export const STATIC_EVIDENCE_TYPES = ["source", "config", "manifest"] as const;
+export const EVIDENCE_TYPES = [...EXECUTION_EVIDENCE_TYPES, ...STATIC_EVIDENCE_TYPES] as const;
+
+export type ExecutionEvidenceType = (typeof EXECUTION_EVIDENCE_TYPES)[number];
+export type EvidenceType = (typeof EVIDENCE_TYPES)[number];
+
 export interface ExecutionRecord {
   /** Submitted types are constrained by ExecutionRecordSchema; unknown fallback values never qualify as execution evidence. */
   type: string;
   path?: string;
+  /** Runtime-computed digest when path names a retained file in HOH_EVIDENCE_DIR. */
+  sha256?: string;
   observation: string;
 }
 
@@ -57,6 +66,8 @@ export interface EvidenceBundle {
   schema_version: 1;
   loop_index: number;
   candidate_id: string;
+  /** Binds fixed-claim coverage to the catalog meaning used during this QA pass. */
+  claim_catalog_sha256: string | null;
   qa_status: QaStatus;
   summary: string;
   verified_records: ClaimRecord[];
@@ -70,6 +81,37 @@ export interface EvidenceBundle {
   runtime_notes: string[];
   usage: RoleUsage;
   created_at: string;
+}
+
+// ---------------------------------------------------------------------------
+// Fixed PRD claims and cross-loop coverage
+// ---------------------------------------------------------------------------
+
+export interface ClaimDefinition {
+  id: string;
+  criterion: string;
+  requires: ExecutionEvidenceType[];
+  weight?: number;
+}
+
+export interface ClaimCatalog {
+  schema_version: 1;
+  spec_sha256: string;
+  claims: ClaimDefinition[];
+}
+
+export type CoverageStatus = "verified" | "gap" | "untested";
+
+export interface CoverageEntry {
+  last_status: CoverageStatus;
+  last_verified_loop: number | null;
+  verified_count: number;
+}
+
+export interface CoverageState {
+  schema_version: 1;
+  claim_catalog_sha256: string;
+  claims: Record<string, CoverageEntry>;
 }
 
 // ---------------------------------------------------------------------------
@@ -139,6 +181,11 @@ export interface CheckResult {
   duration_ms: number;
   stdout_tail: string;
   stderr_tail: string;
+  /** Paths are relative to the loop's evidence directory. */
+  stdout_path?: string;
+  stdout_sha256?: string;
+  stderr_path?: string;
+  stderr_sha256?: string;
 }
 
 // ---------------------------------------------------------------------------

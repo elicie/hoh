@@ -8,7 +8,7 @@ import { gitLog } from "../runtime/git.js";
 import { normalizeEvidence, runHoh } from "../runtime/loop.js";
 import { ExecutionRecordSchema } from "../runtime/schemas.js";
 import { readJson, RunPaths } from "../runtime/state.js";
-import type { CheckResult, DeveloperRecord, EvidenceBundle, EvidenceSubmission, Ledger } from "../types.js";
+import type { CheckResult, ClaimCatalog, DeveloperRecord, EvidenceBundle, EvidenceSubmission, Ledger } from "../types.js";
 import { makeWorkspace } from "./helpers.js";
 
 async function exists(p: string): Promise<boolean> {
@@ -20,7 +20,7 @@ async function exists(p: string): Promise<boolean> {
   }
 }
 
-function normalizeSubmission(submission: EvidenceSubmission, checks: CheckResult[] = []): EvidenceBundle {
+function normalizeSubmission(submission: EvidenceSubmission, checks: CheckResult[] = [], claimCatalog?: ClaimCatalog): EvidenceBundle {
   const candidateSha = "a".repeat(64);
   return normalizeEvidence({
     submission,
@@ -32,6 +32,7 @@ function normalizeSubmission(submission: EvidenceSubmission, checks: CheckResult
     finalText: "",
     usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: 0, turns: 1, duration_ms: 0 },
     attempts: 1,
+    claimCatalog,
   });
 }
 
@@ -106,6 +107,30 @@ test("normalizeEvidence keeps verified claims for every execution evidence type"
       assert.ok(!evidence.runtime_notes.some((note) => /source-only evidence downgraded/i.test(note)));
     });
   }
+});
+
+test("normalizeEvidence enforces fixed-claim evidence requirements while allowing free claims", () => {
+  const catalog: ClaimCatalog = {
+    schema_version: 1,
+    spec_sha256: "a".repeat(64),
+    claims: [{ id: "visual_result", criterion: "The result is visibly distinct.", requires: ["screenshot"] }],
+  };
+  const submission: EvidenceSubmission = {
+    qa_status: "pass",
+    summary: "Runtime behavior was exercised without a screenshot.",
+    verified_records: [
+      { claim_id: "visual_result", claim: "The result is visibly distinct.", execution_records: [{ type: "run", observation: "The result state was reached." }] },
+      { claim_id: "free_runtime_claim", claim: "A free behavior works.", execution_records: [{ type: "run", observation: "The free behavior ran." }] },
+    ],
+    gap_records: [],
+    planner_handoff: { preservation_constraints: [], update_targets: [], validation_requirements: [] },
+  };
+
+  const evidence = normalizeSubmission(submission, [], catalog);
+  assert.deepEqual(evidence.verified_records.map((record) => record.claim_id), ["free_runtime_claim"]);
+  assert.equal(evidence.gap_records[0].claim_id, "visual_result");
+  assert.match(evidence.runtime_notes.join("\n"), /visual_result: missing required evidence types: screenshot/);
+  assert.equal(evidence.qa_status, "partial");
 });
 
 test("failed deterministic checks stay blockers and win claim-id conflicts", () => {
@@ -392,6 +417,24 @@ test("failed deterministic check becomes a blocker gap and fails QA", async () =
   }
 });
 
+test("a deterministic check that mutates candidate source invalidates QA", async () => {
+  const { ws, spec, cleanup } = await makeWorkspace();
+  try {
+    const result = await runHoh({
+      workspace: ws,
+      specPath: spec,
+      harness: createDemoMockHarness(),
+      config: { harness: "mock", loops: 1, checks: [{ name: "mutating-check", command: 'printf "changed by check\\n" >> main.txt' }] },
+    });
+    const evidence = result.results[0].evidence;
+    assert.equal(evidence.qa_status, "fail");
+    assert.ok(evidence.gap_records.some((record) => record.claim_id === "runtime.candidate_mutated_by_checks"));
+    assert.match(evidence.runtime_notes.join("\n"), /candidate mutated during deterministic checks/);
+  } finally {
+    await cleanup();
+  }
+});
+
 test("a workspace that already contains an artifact is treated as a provided loop-00 candidate", async () => {
   const { ws, spec, cleanup } = await makeWorkspace();
   try {
@@ -520,7 +563,7 @@ test("candidate identity is the artifact_dir subtree; tooling outside it does no
   }
 });
 
-test("runtime-owned .hoh changes are not attributed to the tester", async () => {
+test("tester changes to runtime-owned .hoh records are reverted and block QA", async () => {
   const { ws, spec, cleanup } = await makeWorkspace();
   try {
     const demo = createDemoMockHarness();
@@ -529,15 +572,16 @@ test("runtime-owned .hoh changes are not attributed to the tester", async () => 
       planner: (inv, api) => demo["scripts"].planner!(inv, api),
       developer: (inv, api) => demo["scripts"].developer!(inv, api),
       tester: async (inv, api) => {
-        // simulate a runtime-side regeneration of a record file in the main workspace during QA
+        // The Tester knows the main workspace path but may write only inside its evidence directory.
         await writeFile(path.join(ws, ".hoh", "pi-models.json"), JSON.stringify({ providers: {}, changed: Date.now() }));
         return demo["scripts"].tester!(inv, api);
       },
     });
     const result = await runHoh({ workspace: ws, specPath: spec, harness, config: { harness: "mock", loops: 1 } });
     const e = result.results[0].evidence;
-    assert.ok(!e.gap_records.some((g) => g.claim_id === "runtime.workspace_mutated_by_tester"), JSON.stringify(e.gap_records.map((g) => g.claim_id)));
-    assert.equal(e.qa_status, "partial");
+    assert.ok(e.gap_records.some((g) => g.claim_id === "runtime.workspace_mutated_by_tester"), JSON.stringify(e.gap_records.map((g) => g.claim_id)));
+    assert.equal(e.qa_status, "fail");
+    assert.equal(await exists(path.join(ws, ".hoh", "pi-models.json")), false);
   } finally {
     await cleanup();
   }

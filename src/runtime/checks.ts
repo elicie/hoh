@@ -3,40 +3,111 @@
  * commands run against the frozen candidate before the QA Tester starts.
  */
 import { spawn } from "node:child_process";
+import { createHash } from "node:crypto";
+import { mkdir, writeFile } from "node:fs/promises";
+import path from "node:path";
+import { StringDecoder } from "node:string_decoder";
 import type { CheckResult, CheckSpec } from "../types.js";
+import { MAX_EVIDENCE_FILE_BYTES } from "./evidence-files.js";
 
 const TAIL = 4000;
 
-function tail(s: string): string {
-  return s.length > TAIL ? `…(${s.length - TAIL} chars omitted)…\n${s.slice(-TAIL)}` : s;
+interface CapturedOutput {
+  bytes: number;
+  contents: Buffer | null;
+  originalSha256: string;
+  tail: string;
 }
 
-export function runCheck(spec: CheckSpec, cwd: string, defaultTimeoutMs: number, env: Record<string, string> = {}): Promise<CheckResult> {
+class OutputCapture {
+  private readonly decoder = new StringDecoder("utf8");
+  private readonly hash = createHash("sha256");
+  private chunks: Buffer[] = [];
+  private byteCount = 0;
+  private characterCount = 0;
+  private tailText = "";
+  private oversized = false;
+
+  add(value: Buffer | string): void {
+    const chunk = Buffer.isBuffer(value) ? value : Buffer.from(value);
+    this.hash.update(chunk);
+    this.byteCount += chunk.byteLength;
+    if (!this.oversized && this.byteCount <= MAX_EVIDENCE_FILE_BYTES) this.chunks.push(Buffer.from(chunk));
+    else if (!this.oversized) {
+      this.oversized = true;
+      this.chunks = [];
+    }
+    this.appendText(this.decoder.write(chunk));
+  }
+
+  finish(): CapturedOutput {
+    this.appendText(this.decoder.end());
+    return {
+      bytes: this.byteCount,
+      contents: this.oversized ? null : Buffer.concat(this.chunks),
+      originalSha256: this.hash.digest("hex"),
+      tail:
+        this.characterCount > TAIL
+          ? `…(${this.characterCount - TAIL} chars omitted)…\n${this.tailText}`
+          : this.tailText,
+    };
+  }
+
+  private appendText(text: string): void {
+    this.characterCount += text.length;
+    this.tailText = `${this.tailText}${text}`.slice(-TAIL);
+  }
+}
+
+export interface CheckEvidenceOutput {
+  directory: string;
+  basename?: string;
+}
+
+export function runCheck(
+  spec: CheckSpec,
+  cwd: string,
+  defaultTimeoutMs: number,
+  env: Record<string, string> = {},
+  evidence?: CheckEvidenceOutput,
+): Promise<CheckResult> {
   const started = Date.now();
   const timeoutMs = spec.timeout_ms ?? (spec.timeout_min ? spec.timeout_min * 60_000 : defaultTimeoutMs);
-  return new Promise((resolve) => {
-    let stdout = "";
-    let stderr = "";
+  return new Promise((resolve, reject) => {
+    const stdout = new OutputCapture();
+    const stderr = new OutputCapture();
     let timedOut = false;
     let settled = false;
     const finish = (status: CheckResult["status"], exit_code: number | null) => {
       if (settled) return;
       settled = true;
-      resolve({
-        name: spec.name,
-        command: spec.command,
-        status,
-        exit_code,
-        duration_ms: Date.now() - started,
-        stdout_tail: tail(stdout),
-        stderr_tail: tail(stderr),
-      });
+      void (async () => {
+        const stdoutResult = stdout.finish();
+        const stderrResult = stderr.finish();
+        const files = evidence
+          ? await Promise.all([
+              storeCheckOutput(evidence, spec.name, "stdout", stdoutResult),
+              storeCheckOutput(evidence, spec.name, "stderr", stderrResult),
+            ])
+          : [];
+        resolve({
+          name: spec.name,
+          command: spec.command,
+          status,
+          exit_code,
+          duration_ms: Date.now() - started,
+          stdout_tail: stdoutResult.tail,
+          stderr_tail: stderrResult.tail,
+          ...(files[0] ? { stdout_path: files[0].path, stdout_sha256: files[0].sha256 } : {}),
+          ...(files[1] ? { stderr_path: files[1].path, stderr_sha256: files[1].sha256 } : {}),
+        });
+      })().catch(reject);
     };
     let child;
     try {
       child = spawn("sh", ["-c", spec.command], { cwd, stdio: ["ignore", "pipe", "pipe"], detached: true, env: { ...process.env, ...env } });
     } catch (err) {
-      stderr = String(err);
+      stderr.add(String(err));
       finish("error", null);
       return;
     }
@@ -48,11 +119,11 @@ export function runCheck(spec: CheckSpec, cwd: string, defaultTimeoutMs: number,
         child.kill("SIGKILL");
       }
     }, timeoutMs);
-    child.stdout.on("data", (d) => (stdout += d));
-    child.stderr.on("data", (d) => (stderr += d));
+    child.stdout.on("data", (data: Buffer) => stdout.add(data));
+    child.stderr.on("data", (data: Buffer) => stderr.add(data));
     child.on("error", (err) => {
       clearTimeout(timer);
-      stderr += String(err);
+      stderr.add(String(err));
       finish("error", null);
     });
     child.on("close", (code) => {
@@ -65,7 +136,19 @@ export function runCheck(spec: CheckSpec, cwd: string, defaultTimeoutMs: number,
 
 export async function runChecks(specs: CheckSpec[], cwd: string, defaultTimeoutMs = 10 * 60_000, env: Record<string, string> = {}): Promise<CheckResult[]> {
   const results: CheckResult[] = [];
-  for (const spec of specs) results.push(await runCheck(spec, cwd, defaultTimeoutMs, env));
+  for (let index = 0; index < specs.length; index += 1) {
+    const spec = specs[index];
+    const evidenceDir = env.HOH_EVIDENCE_DIR;
+    results.push(
+      await runCheck(
+        spec,
+        cwd,
+        defaultTimeoutMs,
+        env,
+        evidenceDir ? { directory: evidenceDir, basename: `${String(index + 1).padStart(2, "0")}-${safeName(spec.name)}` } : undefined,
+      ),
+    );
+  }
   return results;
 }
 
@@ -75,9 +158,57 @@ export function renderChecks(results: CheckResult[]): string {
   for (const r of results) {
     lines.push(`| \`${r.name}\` | ${r.status.toUpperCase()} | ${r.exit_code ?? "-"} | ${(r.duration_ms / 1000).toFixed(1)}s |`);
   }
+  if (results.some((result) => result.stdout_path || result.stderr_path)) {
+    lines.push("", "Evidence files:");
+    for (const result of results) {
+      if (result.stdout_path) lines.push(`- \`${result.name}\` stdout: \`${result.stdout_path}\` (${result.stdout_sha256?.slice(0, 12) ?? "no hash"})`);
+      if (result.stderr_path) lines.push(`- \`${result.name}\` stderr: \`${result.stderr_path}\` (${result.stderr_sha256?.slice(0, 12) ?? "no hash"})`);
+    }
+  }
   for (const r of results) {
     if (r.status === "pass") continue;
     lines.push("", `### ${r.name} (${r.status})`, "```", `$ ${r.command}`, r.stdout_tail.trim(), r.stderr_tail.trim(), "```");
   }
   return lines.join("\n");
+}
+
+async function storeCheckOutput(
+  output: CheckEvidenceOutput,
+  checkName: string,
+  stream: "stdout" | "stderr",
+  captured: CapturedOutput,
+): Promise<{ path: string; sha256: string }> {
+  const directory = path.join(output.directory, "checks");
+  await mkdir(directory, { recursive: true });
+  const basename = output.basename ?? safeName(checkName);
+  let filename: string;
+  let contents: Buffer;
+  if (captured.contents === null) {
+    filename = `${basename}.${stream}.omitted.json`;
+    contents = Buffer.from(
+      `${JSON.stringify(
+        {
+          omitted: true,
+          reason: `output exceeds the ${MAX_EVIDENCE_FILE_BYTES}-byte evidence file limit`,
+          original_bytes: captured.bytes,
+          original_sha256: captured.originalSha256,
+        },
+        null,
+        2,
+      )}\n`,
+    );
+  } else {
+    filename = `${basename}.${stream}.log`;
+    contents = captured.contents;
+  }
+  const absolute = path.join(directory, filename);
+  await writeFile(absolute, contents);
+  return {
+    path: path.posix.join("checks", filename),
+    sha256: createHash("sha256").update(contents).digest("hex"),
+  };
+}
+
+function safeName(value: string): string {
+  return value.replace(/[^a-zA-Z0-9._-]+/g, "-").replace(/^-+|-+$/g, "") || "check";
 }

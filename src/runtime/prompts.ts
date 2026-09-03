@@ -6,8 +6,9 @@
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import type { CheckResult, EvidenceBundle, Ledger, PlannerOverlay, Role } from "../types.js";
+import type { CheckResult, ClaimCatalog, CoverageState, EvidenceBundle, Ledger, PlannerOverlay, Role } from "../types.js";
 import { renderChecks } from "./checks.js";
+import { renderCoverageTable } from "./coverage.js";
 import { openIssues, renderLedger } from "./ledger.js";
 
 const PROMPTS_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "prompts");
@@ -55,13 +56,17 @@ export function renderEvidence(e: EvidenceBundle | null): string {
   if (e.verified_records.length === 0) lines.push("_None verified._");
   for (const r of e.verified_records) {
     lines.push(`- \`${r.claim_id}\`: ${r.claim}`);
-    for (const x of r.execution_records) lines.push(`  - ${x.type}${x.path ? ` \`${x.path}\`` : ""}: ${x.observation}`);
+    for (const x of r.execution_records) {
+      lines.push(`  - ${x.type}${x.path ? ` \`${x.path}\`` : ""}${x.sha256 ? ` (sha256 ${x.sha256.slice(0, 12)})` : ""}: ${x.observation}`);
+    }
   }
   lines.push("", "### Gaps (repair or gather evidence)");
   if (e.gap_records.length === 0) lines.push("_No gaps recorded._");
   for (const r of e.gap_records) {
     lines.push(`- \`${r.claim_id}\` [${r.severity ?? "unrated"}]: ${r.claim}`);
-    for (const x of r.execution_records) lines.push(`  - ${x.type}${x.path ? ` \`${x.path}\`` : ""}: ${x.observation}`);
+    for (const x of r.execution_records) {
+      lines.push(`  - ${x.type}${x.path ? ` \`${x.path}\`` : ""}${x.sha256 ? ` (sha256 ${x.sha256.slice(0, 12)})` : ""}: ${x.observation}`);
+    }
     if (r.player_impact) lines.push(`  - impact: ${r.player_impact}`);
     if (r.recommended_update) lines.push(`  - recommended: ${r.recommended_update}`);
   }
@@ -147,6 +152,8 @@ export interface PlannerPromptInput {
   previousEvidence: EvidenceBundle | null;
   previousChecks: CheckResult[] | null;
   ledger: Ledger;
+  claimCatalog: ClaimCatalog;
+  coverage: CoverageState;
 }
 
 export async function renderPlannerPrompts(input: PlannerPromptInput): Promise<RolePrompts> {
@@ -159,6 +166,7 @@ export async function renderPlannerPrompts(input: PlannerPromptInput): Promise<R
     spec: input.spec,
     base_candidate: input.baseCandidateId ? `${input.baseCandidateId}${input.baseCandidateId.startsWith("loop-00-") ? " (provided initial artifact, not yet assessed)" : ""}` : "none (empty workspace)",
     evidence_section: renderEvidence(input.previousEvidence),
+    coverage_section: renderCoverageTable(input.claimCatalog, input.coverage),
     ledger_section: renderLedger(input.ledger, { openOnly: true }),
     checks_section: checksSection(input.previousChecks),
     evidence_instruction: first
@@ -222,6 +230,8 @@ export interface TesterPromptInput {
   developmentDocument: string;
   checks: CheckResult[];
   ledger: Ledger;
+  claimCatalog: ClaimCatalog;
+  coverage: CoverageState;
 }
 
 export async function renderTesterPrompts(input: TesterPromptInput): Promise<RolePrompts> {
@@ -236,7 +246,19 @@ export async function renderTesterPrompts(input: TesterPromptInput): Promise<Rol
     development_document: input.developmentDocument,
     checks_section: renderChecks(input.checks),
     ledger_section: renderLedger(input.ledger, { openOnly: true }),
+    coverage_section: renderCoverageTable(input.claimCatalog, input.coverage),
   });
+}
+
+export async function renderClaimDraftPrompts(input: { cwd: string; specPath: string; spec: string }): Promise<RolePrompts> {
+  return {
+    system: render(await template("claims.system"), {}),
+    user: render(await template("claims.user"), {
+      cwd: input.cwd,
+      spec_path: input.specPath,
+      spec: input.spec,
+    }),
+  };
 }
 
 function indent(s: string): string {

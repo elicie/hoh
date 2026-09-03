@@ -33,33 +33,49 @@ to the exact candidate, and records every loop in git.
   hashes the artifact tree (everything except `.hoh/`). The candidate id is
   `loop-NN-<tree hash>`.
 - **Frozen QA.** Deterministic checks and the Tester run in a detached git
-  worktree of that commit. The tree is hashed before and after the Tester
-  session; a mismatch marks the evidence as not bound to the candidate and
-  fails QA with a `runtime.candidate_mutated` blocker.
+  worktree of that commit. The tree is hashed before checks, before Tester, and
+  after Tester; a mismatch fails QA with a runtime blocker.
 - **Runtime records are off limits.** Developer changes under `.hoh/` are
-  reverted and recorded as violations.
+  reverted. Tester writes are limited to the current loop's evidence directory;
+  attempts to change other workspace or runtime records are reverted and fail QA.
 - **Structured output or nothing.** Planner and Tester deliver through tools
   with TypeBox schemas. A missing call is retried once with a runtime notice;
   a Planner that still returns nothing aborts the loop, a Tester that still
   returns nothing yields a failing evidence bundle (`tester.no_structured_output`).
 - **Evidence normalization** (paper appendix A.4): verified vs gap records,
   a claim in both lists counts as a gap, failed deterministic checks become
-  blocker gaps, and the planner handoff is preserved.
+  blocker gaps, source/config/manifest-only verification is downgraded, and
+  fixed claims must satisfy every evidence type in their `requires` list.
+- **Fixed PRD coverage.** `.hoh/claims.json` keeps one stable claim per public
+  acceptance criterion. `.hoh/coverage.json` records each claim as `verified`,
+  `gap`, or `untested`, plus its last verified loop and verification count.
+  Planner and Tester prompts receive the full table; free claims remain allowed.
+  Evidence is bound to the catalog hash, so editing a claim makes its old
+  evidence ineligible until the revised claim is verified again.
 - **Issue ledger.** Gaps open issues, verified records close them, a gap on a
   closed issue marks a regression. Open issues are shown to every Planner and
   Tester. Loop progress is measured by the ledger and the deterministic
   checks, not only by QA PASS (the Fusepoint trajectory has 2 PASS in 96 loops).
 - **Environment for tools.** Checks, `worktree_setup`, and the roles' shells see
   `HOH_WORKSPACE` (main workspace), `HOH_CANDIDATE_DIR` (isolated worktree, during
-  checks and QA), `HOH_RUN_ID`, `HOH_LOOP`, `HOH_ROLE`. Untracked files (such as
+  checks and QA), `HOH_EVIDENCE_DIR` (durable files for the current QA loop),
+  `HOH_RUN_ID`, `HOH_LOOP`, `HOH_ROLE`. Untracked files (such as
   `tools/node_modules`) are not in the worktree; tools can resolve them from
   `$HOH_WORKSPACE` or be installed by `worktree_setup`.
+- **Durable evidence files.** Checks preserve complete stdout and stderr (within
+  the file limit) under the loop's `evidence/checks/` directory while keeping
+  compact tails in JSON; oversized output becomes a small omission manifest.
+  Tester screenshots, logs, replay data, and storage snapshots cited by relative
+  path receive a runtime-computed SHA-256. Links and special files are rejected;
+  limits are 2 MiB per file and 30 MiB per loop. Because these files are committed
+  to git, checks must not print secrets or personal data.
 - **Resume.** Re-running `hoh run` continues after the last completed loop. Inside
   a loop, recorded planner and developer results are reused, so a crash during QA
   re-runs only the tester against the same candidate commit.
-- **Git record.** `docs(loop-NN)`, `feat(loop-NN)`, `test(loop-NN)` commits
-  by `hoh-planner-bot`, `hoh-developer-bot`, `hoh-tester-bot`, plus a
-  regenerated `.hoh/README.md` development record.
+- **Git record.** `docs(loop-NN)`, `feat(loop-NN)`, and `test(loop-NN)` commits
+  by `hoh-planner-bot`, `hoh-developer-bot`, and `hoh-tester-bot`, plus a
+  runtime `chore(loop-NN)` commit that freezes check logs before Tester access
+  and a regenerated `.hoh/README.md` development record.
 
 ## Layout of a run (`<workspace>/.hoh/`)
 
@@ -67,6 +83,9 @@ to the exact candidate, and records every loop in git.
 run.json                    run id, budget T, harness, model, checks
 spec.md                     S, the public specification (copied from --spec)
 ledger.json                 issue ledger
+claims.json                 fixed PRD claim catalog and required evidence types
+coverage.json               per-claim status, last verified loop, verification count
+claims-transcript.jsonl     model events from automatic claim drafting
 README.md                   generated development record
 iterations/loop-NN/
   planner.json              planner overlay + usage
@@ -74,6 +93,7 @@ iterations/loop-NN/
   developer.json            candidate id, tree hash, commit, changed paths, violations
   checks.json               deterministic check results on the frozen candidate
   evidence.json             E_t
+  evidence/                 hashed QA artifacts and retained check output
   tester_report.md          human-readable QA report
   transcripts/<role>.jsonl  pi session events (or mock records)
   error.json                present only when the loop aborted
@@ -169,12 +189,17 @@ echo 'SPBROS_API_KEY=…' > .env
 
 # edit hoh.config.json (providers, models, checks, artifact_dir), then:
 node dist/cli.js config --workspace ../my-game                     # verify models resolve and have credentials
+node dist/cli.js init-claims --workspace ../my-game --spec ./PRD.md # optional: draft and edit claims before running
 node dist/cli.js run    --workspace ../my-game --spec ./PRD.md     # run the budgeted loops
 node dist/cli.js status --workspace ../my-game
 ```
 
 Re-running with the same workspace resumes after the last completed loop;
-`--loops <n>` extends the budget.
+`--loops <n>` extends the budget. If `claims.json` is absent, `run` asks the
+Planner model to draft it before loop 1 and commits it with the run record.
+The generated catalog is a draft: review its PRD coverage and `requires` fields
+before relying on the coverage total. The runtime enforces declared evidence
+requirements but cannot prove that the model included every requirement.
 
 A dry run without any model:
 
@@ -195,6 +220,10 @@ npm test
 - `config.test.ts`: config merge and validation, file resolution order,
   per-role models reaching the harness and the run record, stored config on
   resume, provider validation, pi models.json mapping, model discovery.
+- `coverage.test.ts`: fixed-claim initialization, cross-loop status transitions,
+  required evidence types, prompt/report/status rendering, and `init-claims`.
+- `evidence-files.test.ts`: durable Tester files, check output, SHA-256 binding,
+  git inclusion, path boundaries, size limits, and runtime-record protection.
 - `pi-fake.test.ts`: the real pi SDK session and tool loop driven by a fake
   OpenAI-compatible server declared as a `providers` entry with discovery. Verifies the per-role tool allowlists as the model
   sees them, that disallowed tools are rejected, that built-in `write`/`bash`

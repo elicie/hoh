@@ -3,15 +3,24 @@
  * git history of the workspace carries the development record, the way the
  * Fusepoint trajectory repository keeps `.gameloop/`.
  */
-import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import type { Ledger, Role, RunConfig } from "../types.js";
+import { pathMatchesHead } from "./git.js";
 import { emptyLedger } from "./ledger.js";
 
 export const HOH_DIR = ".hoh";
 
 export function pad(i: number): string {
   return String(i).padStart(2, "0");
+}
+
+/** Parse only the canonical positive loop directory names emitted by RunPaths. */
+export function parseLoopDirName(name: string): number | null {
+  const match = /^loop-(\d+)$/.exec(name);
+  if (!match) return null;
+  const index = Number(match[1]);
+  return Number.isSafeInteger(index) && index > 0 && name === `loop-${pad(index)}` ? index : null;
 }
 
 export class RunPaths {
@@ -34,6 +43,15 @@ export class RunPaths {
   }
   get ledger() {
     return path.join(this.root, "ledger.json");
+  }
+  get claims() {
+    return path.join(this.root, "claims.json");
+  }
+  get coverage() {
+    return path.join(this.root, "coverage.json");
+  }
+  get claimsTranscript() {
+    return path.join(this.root, "claims-transcript.jsonl");
   }
   get readme() {
     return path.join(this.root, "README.md");
@@ -58,6 +76,9 @@ export class RunPaths {
   }
   evidenceJson(i: number) {
     return path.join(this.loopDir(i), "evidence.json");
+  }
+  evidenceDir(i: number) {
+    return path.join(this.loopDir(i), "evidence");
   }
   testerReport(i: number) {
     return path.join(this.loopDir(i), "tester_report.md");
@@ -85,7 +106,13 @@ export async function readJson<T>(file: string): Promise<T | null> {
 
 export async function writeJson(file: string, value: unknown): Promise<void> {
   await mkdir(path.dirname(file), { recursive: true });
-  await writeFile(file, `${JSON.stringify(value, null, 2)}\n`);
+  const temporary = `${file}.tmp-${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  try {
+    await writeFile(temporary, `${JSON.stringify(value, null, 2)}\n`);
+    await rename(temporary, file);
+  } finally {
+    await rm(temporary, { force: true });
+  }
 }
 
 export async function writeText(file: string, text: string): Promise<void> {
@@ -106,15 +133,20 @@ export async function lastCompletedLoop(paths: RunPaths): Promise<number> {
   let entries: string[];
   try {
     entries = await readdir(paths.iterations);
-  } catch {
-    return 0;
+  } catch (error: any) {
+    if (error?.code === "ENOENT") return 0;
+    throw error;
   }
   let last = 0;
   for (const name of entries) {
-    const m = /^loop-(\d+)$/.exec(name);
-    if (!m) continue;
-    const i = Number(m[1]);
-    if ((await readJson(paths.evidenceJson(i))) !== null) last = Math.max(last, i);
+    const i = parseLoopDirName(name);
+    if (i === null) continue;
+    if (
+      (await pathMatchesHead(paths.workspace, paths.rel(paths.evidenceJson(i)))) &&
+      (await readJson(paths.evidenceJson(i))) !== null
+    ) {
+      last = Math.max(last, i);
+    }
   }
   return last;
 }

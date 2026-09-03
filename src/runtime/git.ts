@@ -74,6 +74,14 @@ export async function headCommit(dir: string): Promise<string | null> {
   return r.code === 0 ? r.stdout.trim() : null;
 }
 
+/** True when a working-tree path exists at HEAD and has the same content. */
+export async function pathMatchesHead(dir: string, relativePath: string): Promise<boolean> {
+  const tracked = await git(["cat-file", "-e", `HEAD:${relativePath}`], dir, { allowFail: true });
+  if (tracked.code !== 0) return false;
+  const unchanged = await git(["diff", "--quiet", "HEAD", "--", relativePath], dir, { allowFail: true });
+  return unchanged.code === 0;
+}
+
 /** Stage `pathspec` (default: everything) and commit as `identity`. Returns the commit or null when nothing changed. */
 export async function commitAll(
   dir: string,
@@ -118,8 +126,11 @@ export async function changedPaths(dir: string, from: string | null, to: string)
 }
 
 /** Paths under `pathspec` with uncommitted changes (staged, unstaged, or untracked). */
-export async function pathsChanged(dir: string, pathspec: string[]): Promise<string[]> {
-  const r = await git(["status", "--porcelain", "--untracked-files=all", "--", ...pathspec], dir);
+export async function pathsChanged(dir: string, pathspec: string[], opts: { includeIgnored?: boolean } = {}): Promise<string[]> {
+  const r = await git(
+    ["status", "--porcelain", "--untracked-files=all", ...(opts.includeIgnored ? ["--ignored=matching"] : []), "--", ...pathspec],
+    dir,
+  );
   return r.stdout
     .split("\n")
     .filter(Boolean)
@@ -127,9 +138,9 @@ export async function pathsChanged(dir: string, pathspec: string[]): Promise<str
 }
 
 /** Discard every uncommitted change under `pathspec`. */
-export async function restorePaths(dir: string, pathspec: string[]): Promise<void> {
+export async function restorePaths(dir: string, pathspec: string[], opts: { includeIgnored?: boolean } = {}): Promise<void> {
   await git(["checkout", "-q", "--", ...pathspec], dir, { allowFail: true });
-  await git(["clean", "-fdq", "--", ...pathspec], dir, { allowFail: true });
+  await git(["clean", opts.includeIgnored ? "-fdxq" : "-fdq", "--", ...pathspec], dir, { allowFail: true });
 }
 
 export async function worktreeAdd(repo: string, commitish: string, dir: string): Promise<void> {

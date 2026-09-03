@@ -5,33 +5,26 @@
  */
 import { Type } from "typebox";
 import type { StructuredTool } from "../harness/types.js";
+import { EVIDENCE_TYPES, EXECUTION_EVIDENCE_TYPES } from "../types.js";
 
 export const SUBMIT_PLAN_TOOL = "submit_development_document";
 export const SUBMIT_EVIDENCE_TOOL = "submit_evidence";
+export const SUBMIT_CLAIMS_TOOL = "submit_claims";
 
 const Severity = Type.Union([Type.Literal("minor"), Type.Literal("major"), Type.Literal("blocker")]);
+const ExecutionEvidenceTypeSchema = Type.Union(EXECUTION_EVIDENCE_TYPES.map((value) => Type.Literal(value)));
 
 export const ExecutionRecordSchema = Type.Object({
-  type: Type.Union(
-    [
-      Type.Literal("run"),
-      Type.Literal("test"),
-      Type.Literal("check"),
-      Type.Literal("screenshot"),
-      Type.Literal("replay"),
-      Type.Literal("runtime_trace"),
-      Type.Literal("log"),
-      Type.Literal("storage"),
-      Type.Literal("source"),
-      Type.Literal("config"),
-      Type.Literal("manifest"),
-    ],
-    {
+  type: Type.Union(EVIDENCE_TYPES.map((value) => Type.Literal(value)), {
+    description:
+      "Evidence type. Execution evidence: run | test | check | screenshot | replay | runtime_trace | log | storage. Static evidence: source | config | manifest.",
+  }),
+  path: Type.Optional(
+    Type.String({
       description:
-        "Evidence type. Execution evidence: run | test | check | screenshot | replay | runtime_trace | log | storage. Static evidence: source | config | manifest.",
-    },
+        "File, command, or artifact the observation came from. For screenshots, replay data, storage snapshots, and logs saved in HOH_EVIDENCE_DIR, use a path relative to that directory; the runtime adds sha256.",
+    }),
   ),
-  path: Type.Optional(Type.String({ description: "File, command, or artifact the observation came from" })),
   observation: Type.String({ description: "What was observed, concretely" }),
 });
 
@@ -89,6 +82,21 @@ export const SubmitPlanSchema = Type.Object({
   }),
 });
 
+export const SubmitClaimsSchema = Type.Object({
+  claims: Type.Array(
+    Type.Object({
+      id: Type.String({ pattern: "^[a-z0-9]+(?:_[a-z0-9]+)*$", description: "Stable snake_case claim id" }),
+      criterion: Type.String({ minLength: 1, description: "One independently observable acceptance criterion from the specification" }),
+      requires: Type.Array(ExecutionEvidenceTypeSchema, {
+        uniqueItems: true,
+        description: "Execution evidence types required before this claim may be verified",
+      }),
+      weight: Type.Optional(Type.Number({ exclusiveMinimum: 0 })),
+    }),
+    { minItems: 1 },
+  ),
+});
+
 export const plannerTools: StructuredTool[] = [
   {
     name: SUBMIT_PLAN_TOOL,
@@ -104,5 +112,14 @@ export const testerTools: StructuredTool[] = [
     description:
       "Deliver the evidence bundle for the frozen candidate: verified claims, gaps, and the handoff for the next planner. A verified claim must cite at least one execution record (run, test, check, screenshot, replay, runtime_trace, log, or storage); source/config/manifest-only claims are gaps, and visual claims also require screenshot evidence. Call exactly once when the assessment is complete.",
     parameters: SubmitEvidenceSchema,
+  },
+];
+
+export const claimsTools: StructuredTool[] = [
+  {
+    name: SUBMIT_CLAIMS_TOOL,
+    description:
+      "Deliver the fixed PRD claim catalog. Use one stable snake_case id per independently observable criterion and list every execution evidence type required to verify it. Call exactly once.",
+    parameters: SubmitClaimsSchema,
   },
 ];
