@@ -145,8 +145,19 @@ export function validateConfig(c: HohConfig): string[] {
   }
   if (c.harness !== "pi" && c.harness !== "mock") errors.push(`harness must be "pi" or "mock", got ${JSON.stringify(c.harness)}`);
   if (!Number.isInteger(c.loops) || c.loops < 1) errors.push(`loops must be a positive integer, got ${JSON.stringify(c.loops)}`);
-  if (typeof c.artifact_dir !== "string" || !c.artifact_dir || path.isAbsolute(c.artifact_dir) || c.artifact_dir.startsWith(".."))
+  if (typeof c.artifact_dir !== "string" || !c.artifact_dir || path.isAbsolute(c.artifact_dir) || /[\0\r\n]/.test(c.artifact_dir)) {
     errors.push(`artifact_dir must be a relative path inside the workspace, got ${JSON.stringify(c.artifact_dir)}`);
+  } else {
+    const normalizedArtifact = path.normalize(c.artifact_dir);
+    if (
+      normalizedArtifact === ".." ||
+      normalizedArtifact.startsWith(`..${path.sep}`) ||
+      normalizedArtifact === ".hoh" ||
+      normalizedArtifact.startsWith(`.hoh${path.sep}`)
+    ) {
+      errors.push(`artifact_dir must stay inside the workspace and outside runtime-owned .hoh, got ${JSON.stringify(c.artifact_dir)}`);
+    }
+  }
   for (const [k, v] of Object.entries(c.models)) {
     if (v !== undefined && (typeof v !== "string" || !v.trim())) errors.push(`models.${k} must be a non-empty string`);
     if (!["default", "planner", "developer", "tester"].includes(k)) errors.push(`models.${k} is not a role (use default, planner, developer, tester)`);

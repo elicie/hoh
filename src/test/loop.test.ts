@@ -4,7 +4,8 @@ import path from "node:path";
 import { test } from "node:test";
 import { Check } from "typebox/value";
 import { createDemoMockHarness, MockHarness } from "../harness/mock.js";
-import { gitLog } from "../runtime/git.js";
+import { MAX_INLINE_CANDIDATE_DIFF_BYTES } from "../runtime/candidate-diff.js";
+import { git, gitLog, headCommit } from "../runtime/git.js";
 import { normalizeEvidence, runHoh } from "../runtime/loop.js";
 import { ExecutionRecordSchema } from "../runtime/schemas.js";
 import { readJson, RunPaths } from "../runtime/state.js";
@@ -473,8 +474,19 @@ test("mid-loop resume: a crashed tester is re-run without repeating planner and 
     assert.ok(await exists(paths.developerJson(1)));
     assert.equal(await exists(paths.evidenceJson(1)), false);
     const before = (await readJson<DeveloperRecord>(paths.developerJson(1)))!;
+    assert.ok(before.base_commit_sha);
+    assert.ok(before.candidate_commit_sha);
+    const errorCommit = await headCommit(ws);
+    assert.notEqual(errorCommit, before.candidate_commit_sha, "the runtime error record advances only the main workspace HEAD");
 
-    const healthy = createDemoMockHarness();
+    const healthyDemo = createDemoMockHarness();
+    let resumedWorktreeHead = "";
+    const healthy = new MockHarness({
+      tester: async (inv, api) => {
+        resumedWorktreeHead = (await git(["rev-parse", "HEAD"], inv.cwd)).stdout.trim();
+        return healthyDemo["scripts"].tester!(inv, api);
+      },
+    });
     const result = await runHoh({ workspace: ws, harness: healthy });
     assert.deepEqual(
       healthy.calls.map((c) => c.role),
@@ -483,6 +495,10 @@ test("mid-loop resume: a crashed tester is re-run without repeating planner and 
     );
     assert.equal(result.results[0].developer.candidate_id, before.candidate_id);
     assert.equal(result.results[0].evidence.candidate_id, before.candidate_id);
+    assert.equal(resumedWorktreeHead, before.candidate_commit_sha, "resume freezes the originally recorded candidate commit");
+    const resumedPrompt = healthy.calls[0].prompt;
+    assert.match(resumedPrompt, new RegExp(`Base Git commit: \`${before.base_commit_sha}\``));
+    assert.match(resumedPrompt, new RegExp(`Candidate Git commit: \`${before.candidate_commit_sha}\``));
     assert.equal(result.results[0].planner.objective, "Bootstrap a launchable artifact with a visible player control loop");
     assert.ok(await exists(paths.evidenceJson(1)));
     assert.equal(await exists(paths.errorJson(1)), false, "the superseded error record is removed");
@@ -558,6 +574,86 @@ test("candidate identity is the artifact_dir subtree; tooling outside it does no
     });
     const r2 = await runHoh({ workspace: ws, harness: harness2, config: { loops: 2 } });
     assert.notEqual(r2.results[0].developer.candidate_tree_sha, d1.candidate_tree_sha);
+  } finally {
+    await cleanup();
+  }
+});
+
+test("tester receives an exact, artifact-scoped base-vs-candidate diff", async () => {
+  const { ws, spec, cleanup } = await makeWorkspace();
+  try {
+    const { mkdir, writeFile } = await import("node:fs/promises");
+    await mkdir(path.join(ws, "game"), { recursive: true });
+    await mkdir(path.join(ws, "tools"), { recursive: true });
+    await writeFile(path.join(ws, "game", "product.txt"), "before\n");
+    await writeFile(path.join(ws, "tools", "helper.txt"), "before\n");
+    const demo = createDemoMockHarness();
+    const harness = new MockHarness({
+      planner: (inv, api) => demo["scripts"].planner!(inv, api),
+      developer: async (_inv, api) => {
+        await api.write("game/product.txt", "IN_SCOPE_DIFF\n");
+        await api.write("tools/helper.txt", "OUT_OF_SCOPE_DIFF\n");
+        return "Updated the candidate and its external helper.";
+      },
+      tester: (inv, api) => demo["scripts"].tester!(inv, api),
+    });
+
+    const result = await runHoh({
+      workspace: ws,
+      specPath: spec,
+      harness,
+      config: { harness: "mock", loops: 1, artifact_dir: "game" },
+    });
+    const developer = result.results[0].developer;
+    assert.ok(developer.base_commit_sha);
+    assert.ok(developer.candidate_commit_sha);
+    assert.ok(developer.changed_paths.includes("game/product.txt"));
+    assert.ok(developer.changed_paths.includes("tools/helper.txt"), "the audit record keeps non-runtime changes outside artifact_dir");
+
+    const prompt = harness.calls.find((call) => call.role === "tester")!.prompt;
+    const block = /--- BEGIN CANDIDATE DIFF ---\n([\s\S]*?)\n--- END CANDIDATE DIFF ---/.exec(prompt)?.[1] ?? "";
+    assert.match(prompt, new RegExp(`Base Git commit: \`${developer.base_commit_sha}\``));
+    assert.match(prompt, new RegExp(`Candidate Git commit: \`${developer.candidate_commit_sha}\``));
+    assert.match(prompt, new RegExp(`${developer.base_commit_sha}\\.\\.${developer.candidate_commit_sha}`));
+    assert.match(prompt, /Inline mode: `full`/);
+    assert.match(block, /### Diff stat[\s\S]*### Changed files[\s\S]*### Patch/);
+    assert.match(block, /game\/product\.txt/);
+    assert.match(block, /IN_SCOPE_DIFF/);
+    assert.doesNotMatch(block, /tools\/helper\.txt|OUT_OF_SCOPE_DIFF|\.hoh\//);
+    assert.match(prompt, /':\(top,literal\)game'/);
+  } finally {
+    await cleanup();
+  }
+});
+
+test("large candidate diffs expose only bounded metadata and hunk headers", async () => {
+  const { ws, spec, cleanup } = await makeWorkspace();
+  try {
+    const demo = createDemoMockHarness();
+    const harness = new MockHarness({
+      planner: (inv, api) => demo["scripts"].planner!(inv, api),
+      developer: async (_inv, api) => {
+        // The source line deliberately resembles a `+++` file header after Git adds its `+` body prefix.
+        await api.write("huge.txt", `++ BODY_SENTINEL_${"한".repeat(MAX_INLINE_CANDIDATE_DIFF_BYTES)}\n`);
+        return "Created one large candidate file.";
+      },
+      tester: (inv, api) => demo["scripts"].tester!(inv, api),
+    });
+
+    const result = await runHoh({ workspace: ws, specPath: spec, harness, config: { harness: "mock", loops: 1 } });
+    const developer = result.results[0].developer;
+    const prompt = harness.calls.find((call) => call.role === "tester")!.prompt;
+    const block = /--- BEGIN CANDIDATE DIFF ---\n([\s\S]*?)\n--- END CANDIDATE DIFF ---/.exec(prompt)?.[1] ?? "";
+
+    assert.match(prompt, /Inline mode: `headers`/);
+    assert.ok(Buffer.byteLength(block, "utf8") <= MAX_INLINE_CANDIDATE_DIFF_BYTES);
+    assert.match(block, /Full patch omitted/);
+    assert.match(block, /diff --git a\/huge\.txt b\/huge\.txt/);
+    assert.match(block, /^@@/m);
+    assert.doesNotMatch(block, /BODY_SENTINEL/);
+    assert.doesNotMatch(block, /\.hoh\//);
+    assert.match(prompt, new RegExp(`${developer.base_commit_sha}\\.\\.${developer.candidate_commit_sha}`));
+    assert.match(prompt, /git --no-pager diff --patch --unified=3 --no-color --no-ext-diff --no-textconv --no-renames/);
   } finally {
     await cleanup();
   }

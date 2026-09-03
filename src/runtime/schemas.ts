@@ -31,9 +31,11 @@ export const ExecutionRecordSchema = Type.Object({
 export const ClaimRecordSchema = Type.Object({
   claim_id: Type.String({
     description:
-      "Stable snake_case id for the behavior (e.g. player_control, result_state). Reuse ids from prior evidence for the same behavior.",
+      "Stable snake_case id for one behavior (e.g. player_control, result_state). Reuse the exact id only for the same independently observable behavior.",
   }),
-  claim: Type.String({ description: "Checkable statement about observable behavior" }),
+  claim: Type.String({
+    description: "Checkable statement about exactly one independently observable behavior; split parts that could pass or fail separately",
+  }),
   execution_records: Type.Array(ExecutionRecordSchema, {
     description: "Records that were actually collected for this claim",
   }),
@@ -110,7 +112,7 @@ export const testerTools: StructuredTool[] = [
   {
     name: SUBMIT_EVIDENCE_TOOL,
     description:
-      "Deliver the evidence bundle for the frozen candidate: verified claims, gaps, and the handoff for the next planner. A verified claim must cite at least one execution record (run, test, check, screenshot, replay, runtime_trace, log, or storage); source/config/manifest-only claims are gaps, and visual claims also require screenshot evidence. Call exactly once when the assessment is complete.",
+      "Deliver the evidence bundle for the frozen candidate: verified claims, gaps, and the handoff for the next planner. Each claim covers exactly one independently observable behavior. A verified claim must cite at least one execution record (run, test, check, screenshot, replay, runtime_trace, log, or storage); source/config/manifest-only claims are gaps, and visual claims also require screenshot evidence. Call exactly once when the assessment is complete.",
     parameters: SubmitEvidenceSchema,
   },
 ];

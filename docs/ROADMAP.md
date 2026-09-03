@@ -34,7 +34,7 @@
 
 ## 현재 판단
 
-현재 런타임은 세 역할의 분리 호출, 이전 후보 warm-start, QA용 동결 worktree, 구조화된 증거, 반복 원장, Git 이력, 재개와 논문 실행 계약 고정을 갖췄다. 즉 최소 HoH 루프와 paper/extended 실행 구분이 작동한다. 다음 핵심 작업은 **QA에 실제 후보 diff를 제공하고, 반복 gap을 에스컬레이션하며, 역할별 컨텍스트를 점진적으로 노출하는 것**이다.
+현재 런타임은 세 역할의 분리 호출, 이전 후보 warm-start, QA용 동결 worktree, 실제 후보 diff, 구조화된 증거, 반복 gap 에스컬레이션, Git 이력, 재개와 논문 실행 계약 고정을 갖췄다. 다음 Core 작업은 **역할별 컨텍스트를 점진적으로 노출하고 프롬프트 입력을 줄이는 것**이다.
 
 ## 우선순위 요약
 
@@ -45,9 +45,9 @@
 | 3 | 증거 파일 보존과 해시 | Core | 완료 | 유지 | – | – |
 | 4 | 논문 실행 계약 고정 | Core | 완료 | 유지 | – | – |
 | 5 | 저장소·CI·문서 기준선 | Ops | 완료 | 유지 | – | – |
-| 6 | QA에 후보 diff 제공 | Core | 대기 | P1 | 0.25일 | – |
+| 6 | QA에 후보 diff 제공 | Core | 완료 | 유지 | – | – |
 | 7 | 장기 실행 제어·예산·재시도 | Ops | 부분 완료 | P1 | 1.5~2일 | 4 |
-| 8 | 원장 에스컬레이션 / 후보 복구 | Core / Draft | 부분 완료 | P1 | 0.5~1일 | 1, 2 |
+| 8 | 원장 에스컬레이션 / 후보 복구 | Core / Draft | 8A 완료 / 8B 필요 시 | 유지 | – | 1, 2 |
 | 9 | 점진적 컨텍스트 노출과 프롬프트 정리 | Core | 부분 완료 | P1 | 0.5~1일 | 2; QA diff 연결은 6 |
 | 10 | 역할별 pi 확장·스킬 주입 | Full | 대기 | P1 | 1일 | 4 |
 | 11 | Developer 컨텍스트·토큰 절감 | Ops | 대기 | P2 | 0.5일 | 9 |
@@ -115,20 +115,19 @@
 
 ## 5. 저장소·CI·문서 기준선 — 완료
 
-런타임, PRD coverage, 재현 가능한 검증이 의미 단위 커밋으로 정리돼 있고 CI와 README, 예제가 현재 동작과 맞춰져 있다. 기준일 현재 `npm test` 결과는 49/49 통과다.
+런타임, PRD coverage, 재현 가능한 검증이 의미 단위 커밋으로 정리돼 있고 CI와 README, 예제가 현재 동작과 맞춰져 있다. 기준일 현재 `npm test` 결과는 54/54 통과다.
 
-## 6. QA에 후보 diff 제공 — 다음 QA 정확도 작업
+## 6. QA에 후보 diff 제공 — 완료
 
-**문제.** QA는 Developer의 요약만으로 검사 범위를 추론한다. 후보의 실제 변경 지점을 모르면 white-box 검사가 넓고 얕아질 수 있다.
+Developer 전후의 전체 Git SHA를 candidate record에 고정하고, QA worktree와 diff가 이 endpoint를 함께 사용한다. 따라서 Tester 실패 뒤 runtime error commit이 추가된 resume에서도 동일한 후보를 다시 검사한다.
 
-**구현.** QA 입력 번들에 다음을 추가한다.
+- QA 입력에는 `artifact_dir`로 제한한 diff stat, 변경 파일 목록, patch와 정확한 read-only Git 명령이 들어간다.
+- 루트 artifact에서도 `.hoh`를 literal exclude하고 rename detection을 꺼서 경계 밖 경로가 rename source로 새지 않게 한다.
+- 전체 inline block은 UTF-8 32 KiB로 제한한다. 초과 시 변경 본문은 버리고 bounded stat·파일 목록·파일 metadata·hunk header만 제공한다.
+- 기존 `DeveloperRecord.changed_paths`는 Developer의 전체 non-runtime 변경 감사 기록으로 유지하고, 제품 후보 diff와 섞지 않는다.
+- traversal이나 runtime-owned `.hoh`를 가리키는 `artifact_dir` 설정은 거부한다.
 
-- `git diff --stat <base>..<candidate> -- <artifact_dir>`
-- 크기 상한까지의 diff hunk와 변경 파일 목록
-- 상한을 넘으면 stat과 hunk header만 제공하고, QA가 read-only Git 명령으로 상세 diff를 열 수 있게 한다.
-- runtime-owned 파일과 `.hoh` 기록은 제품 후보 diff에서 제외한다.
-
-**수용 기준.** 프롬프트 스냅샷에서 base/candidate가 정확하고 artifact 경계 밖 파일이 섞이지 않는다. 대형 diff도 입력 예산 상한을 넘지 않는다.
+자동 테스트는 정확한 base/candidate SHA, artifact 경계 밖 파일과 `.hoh` 제외, 대형 diff 본문 제거와 byte 상한, runtime-only HEAD가 전진한 뒤의 QA resume을 검증한다.
 
 ## 7. 장기 실행 제어·예산·재시도 — 부분 완료
 
@@ -152,13 +151,15 @@
 
 실행 증거가 없는 claim은 닫히지 않고 원장 전이가 보존된다. coverage의 `verified | gap | untested`는 전체 PRD 관측 상태이고, ledger의 `open | closed | regressed`는 발견된 이슈의 수명주기다.
 
-### 8A. 에스컬레이션 — Core
+### 8A. 에스컬레이션 — Core 완료
 
-남은 작업:
+동일 gap의 identity는 trim한 뒤 대소문자를 구분하는 exact `claim_id`다. claim 문구가 바뀌어도 id가 같으면 같은 issue이고, 문구가 같아도 id가 다르면 별개다.
 
-- blocker는 다음 루프에서 즉시, 동일 gap이 2회 연속이면 상단 필수 항목으로 승격
-- 하나의 claim이 여러 관찰 행동을 뭉뚱그리지 않도록 QA 지침과 경고 추가
-- `open`, `closed`, `regressed`와 재개 후 상태 전이의 회귀 테스트 보강
+- 한 evidence bundle의 중복 id는 한 번만 계산하고 가장 강한 gap severity를 보존하며, gap과 verified가 충돌하면 gap이 이긴다.
+- streak는 바로 이전 완료 루프에서도 같은 gap이 관찰됐을 때만 증가한다. 같은 루프 replay는 멱등이고, gap이 빠진 루프는 streak를 즉시 0으로 되돌린다.
+- blocker와 2회 연속 gap은 다음 Planner 입력과 Development Document의 최상단 필수 이슈로 승격한다.
+- QA system prompt와 evidence schema는 서로 독립적으로 pass/fail할 수 있는 행동을 하나의 claim으로 묶지 말고 분리하도록 경고한다.
+- `open → closed → regressed`, duplicate, replay, skipped loop, severity와 stable ordering을 자동 테스트한다.
 
 ### 8B. 후보 복구 — Draft, opt-in
 
@@ -274,11 +275,10 @@ receipt는 비밀 값 자체를 저장하지 않고, 재현에 필요한 공개 
 
 ## 권장 진행 순서
 
-1. 서로 독립적인 **6번 후보 diff**와 **8A 에스컬레이션**을 병렬로 진행한다.
-2. **9번 progressive disclosure**를 적용한다. 기본 disclosure 작업은 6번과 병렬 착수할 수 있지만 QA diff 연결은 6번 계약이 끝난 뒤 합친다.
-3. **10번**으로 역할별 하네스 자원을 안전하게 노출한다.
-4. 실제 장기 run 전에 **7번**의 lifecycle·예산·재시도를 추가한다.
-5. 초안식 **8B 후보 복구**는 실제 결정적 회귀가 관찰될 때만 별도 opt-in으로 검증한다.
-6. 성능 비교가 필요해졌을 때만 **14번과 18번**을 묶어 실험한다.
+1. **9번 progressive disclosure**를 적용해 역할별 입력을 줄인다. QA는 완료된 6번 diff 계약을 사용한다.
+2. **10번**으로 역할별 하네스 자원을 안전하게 노출한다.
+3. 실제 장기 run 전에 **7번**의 lifecycle·예산·재시도를 추가한다.
+4. 초안식 **8B 후보 복구**는 실제 결정적 회귀가 관찰될 때만 별도 opt-in으로 검증한다.
+5. 성능 비교가 필요해졌을 때만 **14번과 18번**을 묶어 실험한다.
 
 12, 13, 16, 17은 구체적인 사용 사례가 생기기 전에는 확장하지 않는다.

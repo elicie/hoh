@@ -42,6 +42,13 @@ to the exact candidate, and records every loop in git.
   `.hoh/`. The candidate id is `loop-NN-<tree hash>`. With a narrower
   `artifact_dir`, files elsewhere can be present in the frozen commit but do not
   change the candidate id or its before/after QA hash.
+- **Candidate diff for QA.** The Developer record preserves the exact full Git
+  SHAs before and after development. The Tester receives an artifact-scoped
+  stat, changed-file list, and patch plus a read-only inspection command. The
+  inline block is capped at 32 KiB; larger patches expose metadata and hunk
+  headers only. Runtime-owned `.hoh` files and paths outside `artifact_dir`
+  never enter this diff, and a resumed QA attempt reuses the recorded candidate
+  commit rather than a later runtime-only HEAD.
 - **Frozen QA.** Deterministic checks and the Tester run in a detached git
   worktree of that commit. The tree is hashed before checks, before Tester, and
   after Tester; a mismatch fails QA with a runtime blocker.
@@ -63,9 +70,13 @@ to the exact candidate, and records every loop in git.
   Evidence is bound to the catalog hash, so editing a claim makes its old
   evidence ineligible until the revised claim is verified again.
 - **Issue ledger.** Gaps open issues, verified records close them, a gap on a
-  closed issue marks a regression. Open issues are shown to every Planner and
-  Tester. Loop progress is measured by the ledger and the deterministic
-  checks, not only by QA PASS (the Fusepoint trajectory has 2 PASS in 96 loops).
+  closed issue marks a regression. Exact claim ids identify the same gap across
+  loops. A blocker is mandatory in the next loop, as is a gap observed in two
+  adjacent loops; these escalations appear before discretionary Planner work
+  and at the top of the Developer document. Duplicate or replayed observations
+  count only once. Open issues are shown to every Planner and Tester. Loop
+  progress is measured by the ledger and deterministic checks, not only by QA
+  PASS (the Fusepoint trajectory has 2 PASS in 96 loops).
 - **Environment for tools.** Every loop role invocation inherits
   `HOH_WORKSPACE` (the main workspace), `HOH_RUN_ID`, `HOH_LOOP`, and
   `HOH_ROLE` (the role name); roles that expose a shell can read them there.
@@ -257,9 +268,11 @@ node dist/cli.js status --workspace /tmp/hoh-demo
 npm test
 ```
 
-- `loop.test.ts`: end-to-end loops with a scripted harness, ledger
-  transitions, candidate freezing, `.hoh/` guard, retry and fallback paths,
-  resume, failed checks.
+- `loop.test.ts`: end-to-end loops with a scripted harness, candidate freezing,
+  artifact-scoped bounded QA diffs, `.hoh/` guard, retry and fallback paths,
+  stable resume endpoints, and failed checks.
+- `ledger.test.ts`: exact gap identity, duplicate and replay idempotence,
+  adjacent-loop escalation, and open/closed/regressed transitions.
 - `config.test.ts`: config merge and validation, paper/extended protocol
   receipts and resume guards, file resolution order, per-role models reaching
   the harness and run record, provider validation, pi models.json mapping,

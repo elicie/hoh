@@ -151,6 +151,10 @@ export interface DeveloperRecord {
   base_candidate_id: string | null;
   candidate_id: string;
   candidate_tree_sha: string;
+  /** Exact pre-Developer Git endpoint; optional only for records from older runtimes. */
+  base_commit_sha?: string;
+  /** Exact frozen candidate Git endpoint; optional only for records from older runtimes. */
+  candidate_commit_sha?: string;
   commit: string | null;
   changed_paths: string[];
   summary: string;

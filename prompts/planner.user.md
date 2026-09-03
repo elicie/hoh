@@ -7,6 +7,12 @@
 - Specification file: `{{spec_path}}`
 - Runtime records (read-only for you): `.hoh/`
 
+## Issue ledger (open and regressed issues)
+
+{{ledger_section}}
+
+Items under **Mandatory next-loop issues** are runtime escalations. Put them before discretionary work and carry their observable verification into the Acceptance Gate.
+
 ## Public specification (source of truth)
 
 {{spec}}
@@ -18,10 +24,6 @@
 ## Previous-iteration evidence
 
 {{evidence_section}}
-
-## Issue ledger (open and regressed issues)
-
-{{ledger_section}}
 
 ## Deterministic checks on the base candidate
 

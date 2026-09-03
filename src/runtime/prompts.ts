@@ -9,8 +9,9 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { ROLES, type CheckResult, type ClaimCatalog, type CoverageState, type EvidenceBundle, type Ledger, type PlannerOverlay, type Role } from "../types.js";
 import { renderChecks } from "./checks.js";
+import type { CandidateDiffBundle } from "./candidate-diff.js";
 import { renderCoverageTable } from "./coverage.js";
-import { openIssues, renderLedger } from "./ledger.js";
+import { openIssues, renderEscalatedIssues, renderLedger } from "./ledger.js";
 
 const PROMPTS_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "prompts");
 
@@ -118,7 +119,8 @@ export function renderDevelopmentDocument(input: DevelopmentDocumentInput): stri
   lines.push(`# Development Document — Iteration ${loopIndex}`, "");
   lines.push(`- Base candidate: \`${input.baseCandidateId ?? "none (empty workspace)"}\``);
   lines.push(`- Previous QA status: ${input.previousEvidence ? input.previousEvidence.qa_status.toUpperCase() : "n/a"}`);
-  lines.push("", "## Objective", "", overlay.objective, "");
+  lines.push("", renderEscalatedIssues(input.ledger, { headingLevel: 2 }), "");
+  lines.push("## Objective", "", overlay.objective, "");
   lines.push("## Priority Order", "");
   overlay.priorities.forEach((p, i) => {
     lines.push(`${i + 1}. **${p.name}** — ${p.action}`);
@@ -238,6 +240,7 @@ export interface TesterPromptInput {
   spec: string;
   candidateId: string;
   baseCandidateId: string | null;
+  candidateDiff: CandidateDiffBundle;
   developerSummary: string;
   developmentDocument: string;
   checks: CheckResult[];
@@ -254,6 +257,12 @@ export async function renderTesterPrompts(input: TesterPromptInput): Promise<Rol
     spec: input.spec,
     candidate_id: input.candidateId,
     base_candidate: input.baseCandidateId ?? "none",
+    base_commit_sha: input.candidateDiff.baseCommit,
+    candidate_commit_sha: input.candidateDiff.candidateCommit,
+    candidate_diff_mode: input.candidateDiff.mode,
+    candidate_diff_file_count: input.candidateDiff.changedFileCount,
+    candidate_diff_inline: input.candidateDiff.inline,
+    candidate_diff_inspect_command: input.candidateDiff.inspectCommand,
     developer_summary: input.developerSummary.trim() ? indent(input.developerSummary.trim()) : "_(no summary)_",
     development_document: input.developmentDocument,
     checks_section: renderChecks(input.checks),

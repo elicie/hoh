@@ -34,6 +34,7 @@ import type {
 } from "../types.js";
 import { EXECUTION_EVIDENCE_TYPES } from "../types.js";
 import { runCheck, runChecks } from "./checks.js";
+import { buildCandidateDiff } from "./candidate-diff.js";
 import { ensureClaimState } from "./claims.js";
 import { assertValidConfig, type ConfigPatch, DEFAULT_CONFIG, type HohConfig, mergeConfig, modelForRole } from "./config.js";
 import { claimCatalogSha256, rebuildCoverage } from "./coverage.js";
@@ -339,6 +340,7 @@ export async function runLoop(ctx: Ctx, t: number): Promise<LoopResult> {
     } else {
     process.env.HOH_ROLE = "developer";
     const preDevelopmentCommit = await headCommit(ws);
+    if (!preDevelopmentCommit) throw new Error(`cannot start Developer for loop ${t}: workspace has no base commit`);
     const recordSpec = [".hoh", `:(exclude).hoh/iterations/loop-${pad(t)}/transcripts`];
     // Anything already dirty under .hoh before the developer starts belongs to the runtime, not to the developer.
     const dirtyBefore = new Set(await pathsChanged(ws, recordSpec));
@@ -378,12 +380,15 @@ export async function runLoop(ctx: Ctx, t: number): Promise<LoopResult> {
     const commit = await commitAll(ws, `feat(loop-${pad(t)}): ${oneLine(overlay.objective)}`, ROLE_IDENTITY.developer, ["."]);
     const tree = await artifactTreeHash(ws, { subdir: artifactDir });
     const newCandidateId = `loop-${pad(t)}-${tree.slice(0, 12)}`;
+    const candidateCommit = commit ?? preDevelopmentCommit;
     developer = {
       schema_version: 1,
       loop_index: t,
       base_candidate_id: baseCandidateId,
       candidate_id: newCandidateId,
       candidate_tree_sha: tree,
+      base_commit_sha: preDevelopmentCommit,
+      candidate_commit_sha: candidateCommit,
       commit,
       changed_paths: commit ? (await changedPaths(ws, preDevelopmentCommit, commit)).filter((p) => !p.startsWith(".hoh/")) : [],
       summary: developerRun.result.finalText,
@@ -395,17 +400,17 @@ export async function runLoop(ctx: Ctx, t: number): Promise<LoopResult> {
     log(`${tag} developer: done — candidate ${newCandidateId}, ${developer.changed_paths.length} path(s) changed${commit ? "" : " (no commit)"}`);
     }
     const candidateId = developer.candidate_id;
+    const commitRange = await resolveDeveloperCommitRange(ws, developer);
 
     // ------------------------------------------------- CHECK + TEST (E_t)
     process.env.HOH_ROLE = "tester";
-    const candidateCommit = (await headCommit(ws))!;
     const wt = await mkdtemp(path.join(os.tmpdir(), `hoh-${run.run_id}-loop-${pad(t)}-`));
     const evidenceDir = paths.evidenceDir(t);
     await prepareEvidenceDirectory(evidenceDir);
     let evidence: EvidenceBundle;
     let evidenceBound = false;
     try {
-      await worktreeAdd(ws, candidateCommit, wt);
+      await worktreeAdd(ws, commitRange.candidateCommit, wt);
       const wtArtifact = path.resolve(wt, artifactDir);
       await mkdir(wtArtifact, { recursive: true });
       const candidateBeforeChecks = await artifactTreeHash(wt, { subdir: artifactDir });
@@ -414,6 +419,11 @@ export async function runLoop(ctx: Ctx, t: number): Promise<LoopResult> {
           `candidate worktree ${candidateBeforeChecks.slice(0, 12)} differs from recorded candidate ${developer.candidate_tree_sha.slice(0, 12)} before checks`,
         );
       }
+      const candidateDiff = await buildCandidateDiff(wt, {
+        baseCommit: commitRange.baseCommit,
+        candidateCommit: commitRange.candidateCommit,
+        artifactDir,
+      });
       const checkEnv = {
         HOH_WORKSPACE: ws,
         HOH_CANDIDATE_DIR: wt,
@@ -460,6 +470,7 @@ export async function runLoop(ctx: Ctx, t: number): Promise<LoopResult> {
         spec,
         candidateId,
         baseCandidateId,
+        candidateDiff,
         developerSummary: developer.summary,
         developmentDocument,
         checks,
@@ -849,6 +860,23 @@ export function normalizeEvidence(input: NormalizeInput): EvidenceBundle {
 
 function strList(v: unknown): string[] {
   return Array.isArray(v) ? v.map((x) => String(x)) : [];
+}
+
+/** Recover the exact Developer range while remaining compatible with pre-range records. */
+async function resolveDeveloperCommitRange(
+  workspace: string,
+  developer: DeveloperRecord,
+): Promise<{ baseCommit: string; candidateCommit: string }> {
+  const candidateCommit = developer.candidate_commit_sha ?? developer.commit ?? (await headCommit(workspace));
+  if (!candidateCommit) throw new Error(`candidate ${developer.candidate_id} has no Git commit`);
+  if (developer.base_commit_sha) return { baseCommit: developer.base_commit_sha, candidateCommit };
+  if (!developer.commit) return { baseCommit: candidateCommit, candidateCommit };
+
+  const parent = await git(["rev-parse", "--verify", `${developer.commit}^`], workspace, { allowFail: true });
+  if (parent.code !== 0 || !parent.stdout.trim()) {
+    throw new Error(`cannot reconstruct the base commit for legacy candidate ${developer.candidate_id}`);
+  }
+  return { baseCommit: parent.stdout.trim(), candidateCommit };
 }
 
 function oneLine(s: string, max = 96): string {

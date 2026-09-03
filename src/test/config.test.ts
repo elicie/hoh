@@ -43,6 +43,17 @@ test("config: merge, per-role model fallback, validation", async () => {
   assert.ok(errors.some((e) => /models.default/.test(e)), "pi harness requires a model");
   assert.ok(errors.some((e) => /checks\[0\].name/.test(e)));
 
+  for (const artifact_dir of ["nested/../../outside", ".hoh", "./.hoh/iterations", "line\nbreak"]) {
+    assert.ok(
+      validateConfig(mergeConfig(DEFAULT_CONFIG, { harness: "mock", artifact_dir })).some((e) => /artifact_dir/.test(e)),
+      `${JSON.stringify(artifact_dir)} must not escape into the workspace parent or runtime records`,
+    );
+  }
+  assert.ok(
+    !validateConfig(mergeConfig(DEFAULT_CONFIG, { harness: "mock", artifact_dir: "..cache" })).some((e) => /artifact_dir/.test(e)),
+    "a literal in-workspace directory beginning with dots remains valid",
+  );
+
   // mock harness needs no model
   assert.deepEqual(validateConfig(mergeConfig(DEFAULT_CONFIG, { harness: "mock" })), []);
 });
