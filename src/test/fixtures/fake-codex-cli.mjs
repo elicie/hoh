@@ -16,13 +16,14 @@ const valueAfter = (name) => {
 const schemaPath = valueAfter("--output-schema");
 const outputPath = valueAfter("--output-last-message");
 let final = "fixture final response";
+let outputSchema = null;
 if (schemaPath) {
-  const schema = JSON.parse(await readFile(schemaPath, "utf8"));
-  final = JSON.stringify(sample(schema));
+  outputSchema = JSON.parse(await readFile(schemaPath, "utf8"));
+  final = JSON.stringify(sample(outputSchema));
 }
 if (outputPath) await writeFile(outputPath, final);
 if (process.env.FAKE_CODEX_RECORD) {
-  await writeFile(process.env.FAKE_CODEX_RECORD, JSON.stringify({ args, prompt, final }));
+  await writeFile(process.env.FAKE_CODEX_RECORD, JSON.stringify({ args, prompt, final, outputSchema }));
 }
 if (process.env.FAKE_CODEX_WAIT_MS) await new Promise((resolve) => setTimeout(resolve, Number(process.env.FAKE_CODEX_WAIT_MS)));
 process.stdout.write(`${JSON.stringify({ type: "thread.started", thread_id: "fixture-thread" })}\n`);
@@ -33,7 +34,10 @@ function sample(schema) {
   if (!schema || typeof schema !== "object") return null;
   if (Object.prototype.hasOwnProperty.call(schema, "const")) return schema.const;
   if (Array.isArray(schema.enum) && schema.enum.length > 0) return schema.enum[0];
-  if (Array.isArray(schema.anyOf) && schema.anyOf.length > 0) return sample(schema.anyOf[0]);
+  if (Array.isArray(schema.anyOf) && schema.anyOf.length > 0) {
+    if (process.env.FAKE_CODEX_NULL_OPTIONALS === "1" && schema.anyOf.some((candidate) => candidate?.type === "null")) return null;
+    return sample(schema.anyOf[0]);
+  }
   if (Array.isArray(schema.oneOf) && schema.oneOf.length > 0) return sample(schema.oneOf[0]);
   if (schema.type === "object" || schema.properties) {
     return Object.fromEntries(Object.entries(schema.properties ?? {}).map(([key, value]) => [key, sample(value)]));

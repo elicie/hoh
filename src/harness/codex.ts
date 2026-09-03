@@ -64,7 +64,7 @@ export class CodexHarness implements Harness {
     const schemaPath = path.join(temporary, "output-schema.json");
     const structured = inv.structuredTools[0];
     try {
-      if (structured) await writeFile(schemaPath, `${JSON.stringify(structured.parameters, null, 2)}\n`);
+      if (structured) await writeFile(schemaPath, `${JSON.stringify(toCodexOutputSchema(structured.parameters), null, 2)}\n`);
       const args = [
         ...(this.opts.executableArgs ?? []),
         "exec",
@@ -137,7 +137,7 @@ export class CodexHarness implements Harness {
       const submissions: Record<string, unknown[]> = {};
       if (structured) {
         try {
-          submissions[structured.name] = [JSON.parse(finalText)];
+          submissions[structured.name] = [normalizeCodexSubmission(JSON.parse(finalText), structured.parameters)];
         } catch {
           // The runtime's existing structured-output recovery owns a missing submission.
         }
@@ -147,6 +147,80 @@ export class CodexHarness implements Harness {
       await rm(temporary, { recursive: true, force: true });
     }
   }
+}
+
+/**
+ * Codex uses OpenAI strict Structured Outputs for --output-schema. Every
+ * object must reject extra keys and list every property as required. Preserve
+ * the runtime's optional-field contract by making those fields nullable only
+ * at the Codex boundary; normalize null back to omission after parsing.
+ */
+function toCodexOutputSchema(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(toCodexOutputSchema);
+  if (!isRecord(value)) return value;
+
+  const converted = Object.fromEntries(
+    Object.entries(value).map(([key, child]) => [key, toCodexOutputSchema(child)]),
+  ) as Record<string, unknown>;
+  if (converted.type !== "object" && !isRecord(converted.properties)) return converted;
+
+  const sourceProperties = isRecord(value.properties) ? value.properties : {};
+  const sourceRequired = new Set(
+    Array.isArray(value.required) ? value.required.filter((key): key is string => typeof key === "string") : [],
+  );
+  const properties = Object.fromEntries(
+    Object.entries(sourceProperties).map(([key, schema]) => {
+      const strict = toCodexOutputSchema(schema);
+      return [key, sourceRequired.has(key) ? strict : nullableSchema(strict)];
+    }),
+  );
+  converted.properties = properties;
+  converted.required = Object.keys(properties);
+  converted.additionalProperties = false;
+  return converted;
+}
+
+function nullableSchema(value: unknown): unknown {
+  if (isRecord(value) && Array.isArray(value.anyOf)) {
+    if (value.anyOf.some((candidate) => isRecord(candidate) && candidate.type === "null")) return value;
+    return { ...value, anyOf: [...value.anyOf, { type: "null" }] };
+  }
+  return { anyOf: [value, { type: "null" }] };
+}
+
+function normalizeCodexSubmission(value: unknown, schema: unknown): unknown {
+  const selectedSchema = selectSchemaBranch(schema, value);
+  if (Array.isArray(value)) {
+    const items = isRecord(selectedSchema) ? selectedSchema.items : undefined;
+    return value.map((item) => normalizeCodexSubmission(item, items));
+  }
+  if (!isRecord(value) || !isRecord(selectedSchema) || !isRecord(selectedSchema.properties)) return value;
+
+  const required = new Set(
+    Array.isArray(selectedSchema.required)
+      ? selectedSchema.required.filter((key): key is string => typeof key === "string")
+      : [],
+  );
+  const normalized: Record<string, unknown> = {};
+  for (const [key, child] of Object.entries(value)) {
+    const childSchema = selectedSchema.properties[key];
+    if (child === null && childSchema !== undefined && !required.has(key)) continue;
+    normalized[key] = normalizeCodexSubmission(child, childSchema);
+  }
+  return normalized;
+}
+
+function selectSchemaBranch(schema: unknown, value: unknown): unknown {
+  if (!isRecord(schema) || !Array.isArray(schema.anyOf)) return schema;
+  return schema.anyOf.find((candidate) => schemaAcceptsType(candidate, value)) ?? schema;
+}
+
+function schemaAcceptsType(schema: unknown, value: unknown): boolean {
+  if (!isRecord(schema)) return false;
+  if (value === null) return schema.type === "null";
+  if (Array.isArray(value)) return schema.type === "array";
+  if (typeof value === "object") return schema.type === "object" || isRecord(schema.properties);
+  return schema.type === typeof value || Object.prototype.hasOwnProperty.call(schema, "const");
 }
 
 export async function detectCodexVersion(options: Pick<CodexHarnessOptions, "executable" | "executableArgs" | "env"> = {}): Promise<string> {

@@ -22,7 +22,7 @@ test("codex adapter uses the isolated non-interactive contract and maps schema o
       executable: process.execPath,
       executableArgs: [fixture],
       version: "codex-cli fixture-1.0.0",
-      env: { FAKE_CODEX_RECORD: record },
+      env: { FAKE_CODEX_RECORD: record, FAKE_CODEX_NULL_OPTIONALS: "1" },
     });
     assert.equal(await harness.resolveModel("codex/gpt-fixture:high"), "codex/gpt-fixture:high");
     assert.deepEqual(harness.rolePolicy("planner"), {
@@ -36,11 +36,20 @@ test("codex adapter uses the isolated non-interactive contract and maps schema o
       systemPrompt: "SYSTEM CONTRACT SENTINEL",
       prompt: "USER PROMPT SENTINEL",
       tools: ["read", "grep", "find", "ls"],
-      structuredTools: [{ name: "submit_fixture", description: "fixture", parameters: Type.Object({ ok: Type.Boolean() }) }],
+      structuredTools: [
+        {
+          name: "submit_fixture",
+          description: "fixture",
+          parameters: Type.Object({
+            ok: Type.Boolean(),
+            detail: Type.Object({ required: Type.String(), optional: Type.Optional(Type.String()) }),
+          }),
+        },
+      ],
       model: "codex/gpt-fixture:high",
       onTranscript: (chunk) => transcript.push(chunk),
     });
-    assert.deepEqual(result.submissions.submit_fixture, [{ ok: true }]);
+    assert.deepEqual(result.submissions.submit_fixture, [{ ok: true, detail: { required: "fixture-value" } }]);
     assert.deepEqual(result.usage, { input: 120, output: 30, cacheRead: 20, cacheWrite: 0, totalTokens: 150, cost: 0 });
     assert.equal(result.turns, 1);
     assert.equal(result.model, "codex/gpt-fixture:high");
@@ -52,6 +61,11 @@ test("codex adapter uses the isolated non-interactive contract and maps schema o
     assert.equal(invocation.args[invocation.args.indexOf("--sandbox") + 1], "read-only");
     assert.ok(invocation.args.includes('developer_instructions="SYSTEM CONTRACT SENTINEL"'));
     assert.ok(invocation.args.includes('model_reasoning_effort="high"'));
+    assert.equal(invocation.outputSchema.additionalProperties, false);
+    assert.deepEqual(invocation.outputSchema.required, ["ok", "detail"]);
+    assert.equal(invocation.outputSchema.properties.detail.additionalProperties, false);
+    assert.deepEqual(invocation.outputSchema.properties.detail.required, ["required", "optional"]);
+    assert.ok(invocation.outputSchema.properties.detail.properties.optional.anyOf.some((candidate: { type?: string }) => candidate.type === "null"));
     assert.match(transcript.join(""), /"adapter":"codex"/);
     assert.match(transcript.join(""), /"type":"turn.completed"/);
   } finally {
