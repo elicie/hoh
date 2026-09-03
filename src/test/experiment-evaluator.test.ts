@@ -219,6 +219,23 @@ test("blind evaluator rejects multiple or oversized JSON output and retains boun
   }
 });
 
+test("stream receipts hash the exact stored UTF-8 representation", async () => {
+  const { directory, artifact } = await workspace();
+  try {
+    const script = [
+      "process.stderr.write(Buffer.from([0xff]));",
+      "process.stdout.write('{}');",
+    ].join("");
+    const receipt = await runBlindEvaluator(request(artifact, evaluator(script)));
+    assert.equal(receipt.failure, null);
+    assert.equal(receipt.stderr.raw, "\uFFFD");
+    assert.equal(receipt.stderr.bytes, Buffer.byteLength(receipt.stderr.raw, "utf8"));
+    assert.equal(receipt.stderr.sha256, createHash("sha256").update(receipt.stderr.raw, "utf8").digest("hex"));
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test(
   "on Linux, cancellation and timeout terminate the evaluator process group including descendants",
   { timeout: 15_000, skip: process.platform !== "linux" ? "requires Linux process groups and /proc verification" : false },

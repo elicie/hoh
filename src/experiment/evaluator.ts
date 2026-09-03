@@ -680,11 +680,16 @@ class BoundedCapture {
   }
 
   finish(): EvaluatorStreamReceipt {
-    const raw = Buffer.concat(this.chunks);
+    const captured = Buffer.concat(this.chunks);
+    // Receipts persist a JavaScript string, not the original byte buffer. Make
+    // the stored UTF-8 representation the one and only material covered by
+    // bytes/sha256, including when a process emitted malformed UTF-8.
+    const raw = captured.toString("utf8");
+    const stored = Buffer.from(raw, "utf8");
     return {
-      raw: raw.toString("utf8"),
-      bytes: raw.byteLength,
-      sha256: sha256(raw),
+      raw,
+      bytes: stored.byteLength,
+      sha256: sha256(stored),
       truncated: this.didTruncate,
     };
   }
