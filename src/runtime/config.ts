@@ -14,6 +14,7 @@
 import { readFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { PI_BUILTIN_TOOL_NAMES } from "../harness/types.js";
 import { ROLES, type CheckSpec, type Role } from "../types.js";
 
 export type HarnessName = "pi" | "mock";
@@ -60,6 +61,26 @@ export interface ModelsConfig {
   tester?: string;
 }
 
+export interface PiRoleResourcesConfig {
+  /** Explicit workspace-relative extension files/directories added for this role. */
+  extensions?: string[];
+  /** Explicit workspace-relative skill files/directories added for this role. */
+  skills?: string[];
+  /** Exact extension-registered tool names this role may invoke. */
+  extension_tools?: string[];
+}
+
+export interface PiConfig {
+  /** pi agent directory holding auth.json / models.json / settings.json (default ~/.pi/agent) */
+  agent_dir?: string;
+  /** Explicit workspace-relative extension files/directories shared by all roles. */
+  extensions?: string[];
+  /** Explicit workspace-relative skill files/directories shared by all roles. */
+  skills?: string[];
+  /** Role additions are merged with the shared paths when the manifest is built. */
+  roles?: Partial<Record<Role, PiRoleResourcesConfig>>;
+}
+
 export interface HohConfig {
   /** paper = fixed harness-model/runtime contract; extended = product-specific overrides */
   protocol: ExecutionProtocol;
@@ -84,10 +105,7 @@ export interface HohConfig {
     /** default per-check limit */
     check_min: number;
   };
-  pi: {
-    /** pi agent directory holding auth.json / models.json / settings.json (default ~/.pi/agent) */
-    agent_dir?: string;
-  };
+  pi: PiConfig;
 }
 
 export const DEFAULT_CONFIG: HohConfig = {
@@ -124,9 +142,9 @@ export function mergeConfig(base: HohConfig, patch: ConfigPatch | null | undefin
     worktree_setup: patch.worktree_setup ?? base.worktree_setup,
     checks: patch.checks ? patch.checks.map((c) => ({ ...c })) : base.checks.map((c) => ({ ...c })),
     timeouts: { ...base.timeouts, ...stripUndefined(patch.timeouts ?? {}) },
-    pi: { ...base.pi, ...stripUndefined(patch.pi ?? {}) },
+    pi: mergePiConfig(base.pi, patch.pi),
   };
-  if (merged.pi.agent_dir) merged.pi.agent_dir = expandHome(merged.pi.agent_dir);
+  if (merged.pi?.agent_dir) merged.pi.agent_dir = expandHome(merged.pi.agent_dir);
   return merged;
 }
 
@@ -136,6 +154,29 @@ export function expandHome(p: string): string {
 
 function stripUndefined<T extends object>(o: T): T {
   return Object.fromEntries(Object.entries(o).filter(([, v]) => v !== undefined && v !== null)) as T;
+}
+
+function mergePiConfig(base: PiConfig, patch: Partial<PiConfig> | null | undefined): PiConfig {
+  if (patch === null) return patch as unknown as PiConfig;
+  if (!patch) return structuredClone(base);
+  const definedPatch = Object.fromEntries(Object.entries(patch).filter(([, value]) => value !== undefined)) as Partial<PiConfig>;
+  const merged = { ...structuredClone(base), ...definedPatch };
+  if (Object.prototype.hasOwnProperty.call(patch, "roles")) {
+    if (!patch.roles || typeof patch.roles !== "object" || Array.isArray(patch.roles)) {
+      merged.roles = patch.roles as PiConfig["roles"];
+    } else {
+      const roles: Partial<Record<Role, PiRoleResourcesConfig>> = structuredClone(base.roles ?? {});
+      for (const [role, rolePatch] of Object.entries(patch.roles)) {
+        const current = roles[role as Role] ?? {};
+        roles[role as Role] =
+          rolePatch && typeof rolePatch === "object" && !Array.isArray(rolePatch)
+            ? { ...current, ...Object.fromEntries(Object.entries(rolePatch).filter(([, value]) => value !== undefined)) }
+            : (rolePatch as PiRoleResourcesConfig);
+      }
+      merged.roles = roles;
+    }
+  }
+  return merged;
 }
 
 export function validateConfig(c: HohConfig): string[] {
@@ -218,7 +259,103 @@ export function validateConfig(c: HohConfig): string[] {
     });
   if (!(c.timeouts.role_min > 0)) errors.push("timeouts.role_min must be > 0");
   if (!(c.timeouts.check_min > 0)) errors.push("timeouts.check_min must be > 0");
+  validatePiConfig(c.pi, errors);
   return errors;
+}
+
+const RESERVED_EXTENSION_TOOLS = new Set<string>(PI_BUILTIN_TOOL_NAMES);
+const PI_KEYS = new Set(["agent_dir", "extensions", "skills", "roles"]);
+const PI_ROLE_KEYS = new Set(["extensions", "skills", "extension_tools"]);
+
+function validatePiConfig(pi: PiConfig, errors: string[]): void {
+  if (!pi || typeof pi !== "object" || Array.isArray(pi)) {
+    errors.push("pi must be an object");
+    return;
+  }
+  for (const key of Object.keys(pi)) {
+    if (!PI_KEYS.has(key)) errors.push(`pi.${key} is not supported`);
+  }
+  if (pi.agent_dir !== undefined && (typeof pi.agent_dir !== "string" || !pi.agent_dir.trim())) {
+    errors.push("pi.agent_dir must be a non-empty string");
+  }
+  validateResourcePathList(pi.extensions, "pi.extensions", errors);
+  validateResourcePathList(pi.skills, "pi.skills", errors);
+  if (pi.roles === undefined) return;
+  if (!pi.roles || typeof pi.roles !== "object" || Array.isArray(pi.roles)) {
+    errors.push("pi.roles must be an object keyed by planner, developer, or tester");
+    return;
+  }
+  for (const [role, value] of Object.entries(pi.roles)) {
+    const at = `pi.roles.${role}`;
+    if (!ROLES.includes(role as Role)) {
+      errors.push(`${at} is not a role (use planner, developer, or tester)`);
+      continue;
+    }
+    if (!value || typeof value !== "object" || Array.isArray(value)) {
+      errors.push(`${at} must be an object`);
+      continue;
+    }
+    for (const key of Object.keys(value)) {
+      if (!PI_ROLE_KEYS.has(key)) errors.push(`${at}.${key} is not supported`);
+    }
+    validateResourcePathList(value.extensions, `${at}.extensions`, errors);
+    validateResourcePathList(value.skills, `${at}.skills`, errors);
+    validateExtensionToolList(value.extension_tools, `${at}.extension_tools`, errors);
+  }
+}
+
+function validateResourcePathList(value: unknown, at: string, errors: string[]): void {
+  if (value === undefined) return;
+  if (!Array.isArray(value)) {
+    errors.push(`${at} must be an array of workspace-relative paths`);
+    return;
+  }
+  const seen = new Set<string>();
+  value.forEach((item, index) => {
+    const itemAt = `${at}[${index}]`;
+    if (typeof item !== "string" || !item.trim() || /[\0\r\n]/.test(item)) {
+      errors.push(`${itemAt} must be a non-empty workspace-relative path`);
+      return;
+    }
+    if (path.isAbsolute(item)) {
+      errors.push(`${itemAt} must be relative to the workspace`);
+      return;
+    }
+    const normalized = path.normalize(item);
+    if (
+      normalized === "." ||
+      normalized === ".." ||
+      normalized.startsWith(`..${path.sep}`) ||
+      normalized === ".hoh" ||
+      normalized.startsWith(`.hoh${path.sep}`)
+    ) {
+      errors.push(`${itemAt} must stay inside the workspace and outside runtime-owned .hoh`);
+      return;
+    }
+    if (seen.has(normalized)) errors.push(`${itemAt} duplicates ${JSON.stringify(item)}`);
+    seen.add(normalized);
+  });
+}
+
+function validateExtensionToolList(value: unknown, at: string, errors: string[]): void {
+  if (value === undefined) return;
+  if (!Array.isArray(value)) {
+    errors.push(`${at} must be an array of exact tool names`);
+    return;
+  }
+  const seen = new Set<string>();
+  value.forEach((item, index) => {
+    const itemAt = `${at}[${index}]`;
+    if (typeof item !== "string" || !/^[A-Za-z][A-Za-z0-9_-]*$/.test(item)) {
+      errors.push(`${itemAt} must be a valid exact tool name`);
+      return;
+    }
+    if (RESERVED_EXTENSION_TOOLS.has(item) || item.startsWith("submit_")) {
+      errors.push(`${itemAt} conflicts with reserved built-in/runtime tool ${JSON.stringify(item)}`);
+    }
+    if (seen.has(item)) errors.push(`${itemAt} duplicates ${JSON.stringify(item)}`);
+    seen.add(item);
+  });
 }
 
 function isLoopbackHost(url: string): boolean {

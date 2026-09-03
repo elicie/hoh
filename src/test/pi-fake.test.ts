@@ -4,7 +4,7 @@
  * so the adapter is verified end to end without credentials or network.
  */
 import assert from "node:assert/strict";
-import { mkdir, readFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { test } from "node:test";
 import { createHarness } from "../harness/factory.js";
@@ -12,11 +12,44 @@ import { DEFAULT_CONFIG, mergeConfig } from "../runtime/config.js";
 import { runHoh } from "../runtime/loop.js";
 import { readPiModelsJson } from "../runtime/providers.js";
 import { RunPaths } from "../runtime/state.js";
+import type { HarnessResourceManifest } from "../types.js";
 import { startFakeOpenAI, type FakeStep } from "./fake-openai.js";
 import { makeWorkspace } from "./helpers.js";
 
 test("pi adapter: full loop through the real pi tool loop against a fake provider", async (t) => {
   const { ws, spec, cleanup } = await makeWorkspace();
+  const resourcesDir = path.join(ws, "resources");
+  await mkdir(path.join(resourcesDir, "shared-skill"), { recursive: true });
+  await mkdir(path.join(resourcesDir, "developer-skill"), { recursive: true });
+  await writeFile(
+    path.join(resourcesDir, "role-tools.ts"),
+    `import { writeFile } from "node:fs/promises";
+import path from "node:path";
+import { Type } from "@earendil-works/pi-ai";
+import { defineTool } from "@earendil-works/pi-coding-agent";
+
+export default function roleTools(pi) {
+  pi.registerTool(defineTool({
+    name: "write_role_marker",
+    label: "Write role marker",
+    description: "Write a test marker into the current role workspace.",
+    parameters: Type.Object({ file: Type.String(), content: Type.String() }),
+    async execute(_id, params, _signal, _update, ctx) {
+      await writeFile(path.join(ctx.cwd, params.file), params.content);
+      return { content: [{ type: "text", text: "marker written" }], details: {} };
+    },
+  }));
+}
+`,
+  );
+  await writeFile(
+    path.join(resourcesDir, "shared-skill", "SKILL.md"),
+    "---\nname: shared-fixture\ndescription: HOH_SHARED_SKILL_MARKER\n---\n\nShared fixture instructions.\n",
+  );
+  await writeFile(
+    path.join(resourcesDir, "developer-skill", "SKILL.md"),
+    "---\nname: developer-fixture\ndescription: HOH_DEVELOPER_SKILL_MARKER\n---\n\nDeveloper-only fixture instructions.\n",
+  );
   const server = await startFakeOpenAI(
     (view): FakeStep => {
     switch (view.role) {
@@ -26,6 +59,9 @@ test("pi adapter: full loop through the real pi tool loop against a fake provide
           return { tool: { name: "write", arguments: { path: "planner-should-not-write.txt", content: "x" } } };
         }
         if (view.step === 1) {
+          return { tool: { name: "write_role_marker", arguments: { file: "planner-extension-should-not-write.txt", content: "x" } } };
+        }
+        if (view.step === 2) {
           return {
             tool: {
               name: "submit_development_document",
@@ -40,8 +76,11 @@ test("pi adapter: full loop through the real pi tool loop against a fake provide
         }
         return { text: "Plan submitted." };
       case "developer":
-        if (view.step === 0) return { tool: { name: "write", arguments: { path: "hello.txt", content: "hello from the fake developer\n" } } };
-        if (view.step === 1) {
+        if (view.step === 0) {
+          return { tool: { name: "write_role_marker", arguments: { file: "extension-marker.txt", content: "developer extension ran\n" } } };
+        }
+        if (view.step === 1) return { tool: { name: "write", arguments: { path: "hello.txt", content: "hello from the fake developer\n" } } };
+        if (view.step === 2) {
           return {
             tool: {
               name: "bash",
@@ -56,6 +95,9 @@ test("pi adapter: full loop through the real pi tool loop against a fake provide
       case "tester":
         if (view.step === 0) return { tool: { name: "edit", arguments: { path: "hello.txt", oldText: "hello", newText: "bye" } } };
         if (view.step === 1) {
+          return { tool: { name: "write_role_marker", arguments: { file: "tester-extension-should-not-write.txt", content: "x" } } };
+        }
+        if (view.step === 2) {
           return {
             tool: {
               name: "bash",
@@ -66,7 +108,7 @@ test("pi adapter: full loop through the real pi tool loop against a fake provide
             },
           };
         }
-        if (view.step === 2) {
+        if (view.step === 3) {
           return {
             tool: {
               name: "submit_evidence",
@@ -105,7 +147,17 @@ test("pi adapter: full loop through the real pi tool loop against a fake provide
   const config = mergeConfig(DEFAULT_CONFIG, {
     harness: "pi",
     loops: 1,
-    pi: { agent_dir: agentDir },
+    pi: {
+      agent_dir: agentDir,
+      extensions: ["resources/role-tools.ts"],
+      skills: ["resources/shared-skill"],
+      roles: {
+        developer: {
+          skills: ["resources/developer-skill"],
+          extension_tools: ["write_role_marker"],
+        },
+      },
+    },
     providers: {
       fake: {
         base_url: server.baseUrl,
@@ -128,7 +180,9 @@ test("pi adapter: full loop through the real pi tool loop against a fake provide
     assert.equal(planner.objective, "Bootstrap a launchable artifact");
     assert.equal(planner.attempts, 1);
     assert.equal(await readFile(path.join(ws, "hello.txt"), "utf8"), "hello from the fake developer\n");
+    assert.equal(await readFile(path.join(ws, "extension-marker.txt"), "utf8"), "developer extension ran\n");
     assert.ok(developer.changed_paths.includes("hello.txt"));
+    assert.ok(developer.changed_paths.includes("extension-marker.txt"));
     assert.match(developer.summary, /Wrote hello.txt/);
     assert.equal(evidence.qa_status, "pass");
     assert.equal(evidence.frozen, true, `tester edit must have been blocked: ${JSON.stringify(evidence.runtime_notes)}`);
@@ -153,15 +207,33 @@ test("pi adapter: full loop through the real pi tool loop against a fake provide
     const plannerReq = server.requests.find((r) => r.role === "planner")!;
     assert.deepEqual([...plannerReq.toolNames].sort(), ["find", "grep", "ls", "read", "submit_development_document"]);
     const devReq = server.requests.find((r) => r.role === "developer")!;
-    assert.deepEqual([...devReq.toolNames].sort(), ["bash", "edit", "find", "grep", "ls", "read", "write"]);
+    assert.deepEqual([...devReq.toolNames].sort(), ["bash", "edit", "find", "grep", "ls", "read", "write", "write_role_marker"]);
     const testerReq = server.requests.find((r) => r.role === "tester")!;
     assert.deepEqual([...testerReq.toolNames].sort(), ["bash", "find", "grep", "ls", "read", "submit_evidence"]);
+
+    assert.match(plannerReq.systemPrompt, /HOH_SHARED_SKILL_MARKER/);
+    assert.doesNotMatch(plannerReq.systemPrompt, /HOH_DEVELOPER_SKILL_MARKER/);
+    assert.match(devReq.systemPrompt, /HOH_SHARED_SKILL_MARKER/);
+    assert.match(devReq.systemPrompt, /HOH_DEVELOPER_SKILL_MARKER/);
+    assert.match(testerReq.systemPrompt, /HOH_SHARED_SKILL_MARKER/);
+    assert.doesNotMatch(testerReq.systemPrompt, /HOH_DEVELOPER_SKILL_MARKER/);
 
     // The disallowed calls were answered with tool errors, not executed.
     const plannerWriteResult = server.requests.find((r) => r.role === "planner" && r.step === 1)!.lastToolResult ?? "";
     assert.match(plannerWriteResult, /not found|not available|unknown/i);
+    const plannerExtensionResult = server.requests.find((r) => r.role === "planner" && r.step === 2)!.lastToolResult ?? "";
+    assert.match(plannerExtensionResult, /not found|not available|unknown|does not allow/i);
     const testerEditResult = server.requests.find((r) => r.role === "tester" && r.step === 1)!.lastToolResult ?? "";
     assert.match(testerEditResult, /not found|not available|unknown/i);
+    const testerExtensionResult = server.requests.find((r) => r.role === "tester" && r.step === 2)!.lastToolResult ?? "";
+    assert.match(testerExtensionResult, /not found|not available|unknown|does not allow/i);
+
+    const resourceManifest = (await readFile(paths.piResources, "utf8").then((text) => JSON.parse(text))) as HarnessResourceManifest;
+    assert.equal(resourceManifest.roles.planner.extensions.length, 1);
+    assert.equal(resourceManifest.roles.developer.skills.length, 2);
+    assert.deepEqual(resourceManifest.roles.developer.extension_tools, ["write_role_marker"]);
+    assert.match(resourceManifest.manifest_sha256, /^[0-9a-f]{64}$/);
+    assert.equal(result.run.protocol_receipt?.role_contracts.developer.resources?.manifest_sha256, resourceManifest.roles.developer.manifest_sha256);
 
     // Transcripts were written by the adapter.
     const transcript = await readFile(paths.transcript(1, "developer"), "utf8");
@@ -173,6 +245,56 @@ test("pi adapter: full loop through the real pi tool loop against a fake provide
   } finally {
     if (previousTmpDir === undefined) delete process.env.TMPDIR;
     else process.env.TMPDIR = previousTmpDir;
+    await server.close();
+    await cleanup();
+  }
+});
+
+test("pi adapter: rejects an invalid configured skill before contacting the model", async () => {
+  const { ws, cleanup } = await makeWorkspace();
+  const skillDir = path.join(ws, "resources", "broken-skill");
+  const agentDir = path.join(path.dirname(ws), "pi-agent-invalid-skill");
+  await mkdir(skillDir, { recursive: true });
+  await mkdir(agentDir, { recursive: true });
+  await writeFile(path.join(skillDir, "SKILL.md"), "# Missing required frontmatter\n");
+  const server = await startFakeOpenAI(() => ({ text: "must not be reached" }), {
+    models: ["fake-model"],
+    apiKey: "invalid-skill-key",
+  });
+  const previousKey = process.env.HOH_INVALID_SKILL_KEY;
+  process.env.HOH_INVALID_SKILL_KEY = "invalid-skill-key";
+  const config = mergeConfig(DEFAULT_CONFIG, {
+    harness: "pi",
+    pi: { agent_dir: agentDir, skills: ["resources/broken-skill"] },
+    providers: {
+      fake: {
+        base_url: server.baseUrl,
+        api_key: "$HOH_INVALID_SKILL_KEY",
+        models: "discover",
+      },
+    },
+    models: { default: "fake/fake-model" },
+  });
+
+  try {
+    const harness = await createHarness(config, ws, { runtimeOptions: { refreshOnCreate: false } });
+    await assert.rejects(
+      harness.invoke({
+        role: "planner",
+        loopIndex: 1,
+        cwd: ws,
+        systemPrompt: "You are the Project Planner.",
+        prompt: "Do not contact the model.",
+        tools: ["read"],
+        structuredTools: [],
+        model: "fake/fake-model",
+      }),
+      /failed to load planner skills|planner skill resources loaded no valid skill/,
+    );
+    assert.equal(server.requests.length, 0);
+  } finally {
+    if (previousKey === undefined) delete process.env.HOH_INVALID_SKILL_KEY;
+    else process.env.HOH_INVALID_SKILL_KEY = previousKey;
     await server.close();
     await cleanup();
   }

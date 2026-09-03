@@ -129,12 +129,20 @@ to the exact candidate, and records every loop in git.
   structured-output retry notice, is stored under the loop's `prompts/`
   directory with per-input and combined SHA-256 values. The optional loop-0
   claim-drafting call keeps its existing `claims-transcript.jsonl` record.
+- **Explicit pi resources.** Pi extensions and skills are disabled by default.
+  Workspace-relative paths may be enabled globally or per role; extension tools
+  are active only when named in that role's allowlist. Real paths and recursive
+  content hashes are stored in `.hoh/pi-resources.json`, checked again before
+  and after loading, and included in new protocol receipts. Extensions are
+  trusted executable code, not a sandbox: use reviewed local code and scoped
+  credentials even when its LLM-callable tools are restricted.
 
 ## Layout of a run (`<workspace>/.hoh/`)
 
 ```
 run.json                    run id, budget T, harness, model, checks
 spec.md                     S, the public specification (copied from --spec)
+pi-resources.json           resolved role extension/skill/tool manifest and hashes
 ledger.json                 issue ledger
 claims.json                 fixed PRD claim catalog and required evidence types
 coverage.json               per-claim status, last verified loop, verification count
@@ -213,6 +221,38 @@ lists can be discovered from `GET {base_url}/models`. The root config uses
 | `checks[]` | deterministic commands run on the frozen candidate before QA (`name`, `command`, optional `timeout_min`) |
 | `timeouts.role_min` / `check_min` | wall-clock limits |
 | `pi.agent_dir` | pi's credential/models directory (default `~/.pi/agent`) |
+| `pi.extensions` / `pi.skills` | reviewed workspace-relative resource paths loaded for every role; ambient pi discovery remains disabled |
+| `pi.roles.<role>.extensions` / `skills` | additional resources loaded only for `planner`, `developer`, or `tester` |
+| `pi.roles.<role>.extension_tools` | exact extension-registered tool names exposed to that role; built-in and `submit_*` names are reserved |
+
+For example, this loads one shared skill for every role while loading a
+reviewed extension and its tool only for the Developer:
+
+```json
+{
+  "pi": {
+    "skills": ["skills/shared"],
+    "roles": {
+      "developer": {
+        "extensions": ["tools/project-tools.ts"],
+        "skills": ["skills/implementation"],
+        "extension_tools": ["inspect_project"]
+      }
+    }
+  }
+}
+```
+
+Each list accepts existing regular files or directories. A configured path must
+resolve inside the workspace and outside `.hoh`, and a directory resource may
+not contain symlinks. Extension package entrypoints declared by `package.json`
+must also stay inside the configured, hashed directory; only exact paths and
+simple `*`/`?` globs are accepted so brace, class, or extglob expansion cannot
+cross that boundary. Invalid skills, unloaded extension entrypoints, and extension tools that replace any Pi built-in
+(including `powershell`) or `submit_*` tool fail before a model request. A new
+`paper` run fixes each role's resolved paths, bytes, and extension-tool allowlist
+in its immutable role contract. Any resource drift therefore requires a fresh
+run rather than a resume.
 
 Resolution order, first wins:
 
@@ -307,10 +347,15 @@ npm test
   git inclusion, path boundaries, size limits, and runtime-record protection.
 - `pi-fake.test.ts`: the real pi SDK session and tool loop driven by a fake
   OpenAI-compatible server declared as a `providers` entry with discovery. Verifies the per-role tool allowlists as the model
-  sees them, that disallowed tools are rejected, that built-in `write`/`bash`
-  work for the Developer, that structured tools are captured, that per-role
-  models from the config reach the provider, and that usage and transcripts
-  are recorded.
+  sees them, role-specific extension and skill loading, that disallowed tools
+  are rejected, that built-in and allowlisted extension writes work only for
+  the Developer, that structured tools are captured, that per-role models from
+  the config reach the provider, that invalid configured skills fail before a
+  model request, and that usage and transcripts are recorded.
+- `pi-resources.test.ts`: resource config merging and validation, deterministic
+  file/directory hashing, workspace, runtime-record, symlink, package-entrypoint
+  and glob boundaries, reserved-tool checks, drift detection, and paper-resume
+  receipt enforcement.
 
 ## Extending
 
@@ -318,9 +363,9 @@ npm test
   (one `invoke` per role) and pass it to `runHoh`. The paper's protocol is
   harness-agnostic; the pi adapter is `src/harness/pi.ts`.
 - **Domain tools and skills.** The Fusepoint run used Godot MCP, asset tools
-  and skills. With pi, add them through the `DefaultResourceLoader` options
-  in the adapter (`additionalExtensionPaths`, `additionalSkillPaths`) or by
-  registering custom tools per role.
+  and skills. With pi, declare reviewed local paths and per-role extension-tool
+  names under the `pi` config shown above; the adapter keeps ambient discovery
+  disabled and records the resolved manifest.
 - **Prompts.** `prompts/<role>.system.md` and `prompts/<role>.user.md` follow
   appendix A.2 of the paper; `{{slot}}` values are filled by
   `src/runtime/prompts.ts`.

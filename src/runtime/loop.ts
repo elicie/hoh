@@ -147,6 +147,7 @@ export async function runHoh(opts: RunOptions): Promise<RunResult> {
     await copyFile(path.resolve(opts.specPath), paths.spec);
     await writeJson(paths.config, config);
     await writeJson(paths.runJson, run);
+    if (opts.harness.resourceManifest) await writeJson(paths.piResources, opts.harness.resourceManifest);
     await writeJson(paths.ledger, emptyLedger());
     initialized = true;
   } else {
@@ -178,6 +179,7 @@ export async function runHoh(opts: RunOptions): Promise<RunResult> {
       const requestedReceipt = await buildProtocolReceipt(config, opts.harness, {
         legacyDefault: protocolReceipt.legacy_default,
         origin: protocolReceipt.origin,
+        includeResourceContracts: Object.values(protocolReceipt.role_contracts).some((contract) => contract.resources !== undefined),
       });
       if (requestedReceipt.protocol_sha256 !== protocolReceipt.protocol_sha256) {
         throw new Error(
@@ -189,6 +191,9 @@ export async function runHoh(opts: RunOptions): Promise<RunResult> {
     run.config = config;
     run.config_source = configSource;
     run.protocol_receipt = protocolReceipt;
+    // The detailed path manifest is a runtime record. For paper runs it is only
+    // materialized after the immutable receipt comparison above has succeeded.
+    if (opts.harness.resourceManifest) await writeJson(paths.piResources, opts.harness.resourceManifest);
     await writeJson(paths.config, config);
     await writeJson(paths.runJson, run);
     if (changed) {

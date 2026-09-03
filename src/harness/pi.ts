@@ -5,7 +5,8 @@
  *   - the role's system prompt replacing pi's default prompt
  *   - a tool allowlist (read-only for Planner, inspect-only for Tester, full for Developer)
  *   - structured-output tools (`submit_development_document`, `submit_evidence`)
- *   - no project extensions/skills/context files (the runtime owns the contract)
+ *   - ambient resources disabled; only runtime-attested role extensions and skills loaded
+ *   - no project prompt templates, themes, or context files (the runtime owns the contract)
  */
 import fs from "node:fs";
 import path from "node:path";
@@ -16,13 +17,15 @@ import {
   DefaultResourceLoader,
   defineTool,
   getAgentDir,
+  type InlineExtension,
   ModelRuntime,
   resolveCliModel,
   SessionManager,
   SettingsManager,
 } from "@earendil-works/pi-coding-agent";
+import type { HarnessResourceManifest, ResourceManifestEntry, Role, RoleResourceManifest } from "../types.js";
 import type { Harness, RoleInvocation, RoleResult } from "./types.js";
-import { emptyUsage } from "./types.js";
+import { emptyUsage, PI_BUILTIN_TOOL_NAMES } from "./types.js";
 
 type ThinkingLevel = NonNullable<CreateAgentSessionOptions["thinkingLevel"]>;
 
@@ -36,6 +39,10 @@ export interface PiHarnessOptions {
   modelRuntime?: ModelRuntime;
   /** create-time options when no runtime is injected */
   modelRuntimeOptions?: Parameters<typeof ModelRuntime.create>[0];
+  /** Exact role resources resolved and hashed by the runtime before the run starts. */
+  resourceManifest?: HarnessResourceManifest;
+  /** Re-hash one role's resources immediately before and after loading them. */
+  verifyResourceManifest?: (role: Role) => Promise<void>;
 }
 
 const MAX_STRING = 20_000;
@@ -53,9 +60,12 @@ function piPackageVersion(): string {
 export class PiHarness implements Harness {
   readonly name = "pi";
   readonly version = piPackageVersion();
+  readonly resourceManifest?: HarnessResourceManifest;
   private runtime?: Promise<ModelRuntime>;
 
-  constructor(private readonly opts: PiHarnessOptions = {}) {}
+  constructor(private readonly opts: PiHarnessOptions = {}) {
+    this.resourceManifest = opts.resourceManifest;
+  }
 
   private getRuntime(): Promise<ModelRuntime> {
     if (!this.runtime) {
@@ -72,8 +82,13 @@ export class PiHarness implements Harness {
   }
 
   async invoke(inv: RoleInvocation): Promise<RoleResult> {
+    await this.opts.verifyResourceManifest?.(inv.role);
     const modelRuntime = await this.getRuntime();
     const agentDir = this.opts.agentDir ?? getAgentDir();
+    const roleResources = this.resourceManifest?.roles[inv.role];
+    const extensionTools = roleResources?.extension_tools ?? [];
+    const allowedTools = [...inv.tools, ...inv.structuredTools.map((tool) => tool.name), ...extensionTools];
+    const allowedToolNames = new Set<string>(allowedTools);
 
     let model;
     let thinkingLevel = this.opts.thinkingLevel;
@@ -90,6 +105,9 @@ export class PiHarness implements Harness {
     const loader = new DefaultResourceLoader({
       cwd: inv.cwd,
       agentDir,
+      additionalExtensionPaths: roleResources?.extensions.map((entry) => entry.resolved_path),
+      additionalSkillPaths: roleResources?.skills.map((entry) => entry.resolved_path),
+      extensionFactories: [roleToolGuard(allowedToolNames)],
       noExtensions: true,
       noSkills: true,
       noPromptTemplates: true,
@@ -99,6 +117,8 @@ export class PiHarness implements Harness {
       appendSystemPromptOverride: () => [],
     });
     await loader.reload();
+    await this.opts.verifyResourceManifest?.(inv.role);
+    assertLoadedRoleResources(loader, inv.role, roleResources);
 
     const submissions: Record<string, unknown[]> = {};
     const customTools = inv.structuredTools.map((t) =>
@@ -123,7 +143,7 @@ export class PiHarness implements Harness {
       modelRuntime,
       model,
       thinkingLevel,
-      tools: [...inv.tools, ...inv.structuredTools.map((t) => t.name)],
+      tools: allowedTools,
       customTools,
       resourceLoader: loader,
       sessionManager: SessionManager.inMemory(inv.cwd),
@@ -139,7 +159,7 @@ export class PiHarness implements Harness {
     let lastError: string | undefined;
     let lastStop: string | undefined;
     inv.onTranscript?.(
-      `${JSON.stringify({ ts: new Date().toISOString(), type: "hoh_invocation", role: inv.role, loop: inv.loopIndex, cwd: inv.cwd, tools: [...inv.tools, ...inv.structuredTools.map((t) => t.name)], model: usedModel })}\n`,
+      `${JSON.stringify({ ts: new Date().toISOString(), type: "hoh_invocation", role: inv.role, loop: inv.loopIndex, cwd: inv.cwd, tools: allowedTools, model: usedModel })}\n`,
     );
 
     const unsubscribe = session.subscribe((event: any) => {
@@ -181,6 +201,82 @@ export class PiHarness implements Harness {
     }
     return { finalText, submissions, usage, turns, model: usedModel };
   }
+}
+
+function roleToolGuard(allowedTools: ReadonlySet<string>): InlineExtension {
+  return {
+    name: "hoh-role-tool-guard",
+    hidden: true,
+    factory(pi) {
+      pi.on("tool_call", (event) => {
+        if (allowedTools.has(event.toolName)) return undefined;
+        return {
+          block: true,
+          reason: `HoH role policy does not allow tool ${JSON.stringify(event.toolName)}`,
+        };
+      });
+    },
+  };
+}
+
+function assertLoadedRoleResources(loader: DefaultResourceLoader, role: Role, resources: RoleResourceManifest | undefined): void {
+  const extensions = loader.getExtensions();
+  if (extensions.errors.length > 0) {
+    throw new Error(
+      `pi: failed to load ${role} extensions: ${extensions.errors.map((error) => `${error.path}: ${error.error}`).join("; ")}`,
+    );
+  }
+
+  const registeredExtensionTools = new Set<string>();
+  const loadedExtensions = extensions.extensions.filter((extension) => extension.path !== "<inline:hoh-role-tool-guard>");
+  for (const extension of loadedExtensions) {
+    if (!resources?.extensions.some((entry) => containsResolvedPath(entry, extension.resolvedPath))) {
+      throw new Error(`pi: ${role} loaded extension outside its recorded resource manifest: ${extension.resolvedPath}`);
+    }
+    for (const name of extension.tools.keys()) {
+      if (PI_BUILTIN_TOOL_NAMES.includes(name) || name.startsWith("submit_")) {
+        throw new Error(`pi: ${role} extension ${extension.path} conflicts with reserved tool ${JSON.stringify(name)}`);
+      }
+      registeredExtensionTools.add(name);
+    }
+  }
+  const unloadedExtensions = (resources?.extensions ?? []).filter(
+    (entry) => !loadedExtensions.some((extension) => containsResolvedPath(entry, extension.resolvedPath)),
+  );
+  if (unloadedExtensions.length > 0) {
+    throw new Error(`pi: ${role} extension resources loaded no entrypoint: ${unloadedExtensions.map((entry) => entry.configured_path).join(", ")}`);
+  }
+
+  const missingTools = (resources?.extension_tools ?? []).filter((name) => !registeredExtensionTools.has(name));
+  if (missingTools.length > 0) {
+    throw new Error(`pi: ${role} extension tool allowlist names tools that were not registered: ${missingTools.join(", ")}`);
+  }
+
+  const skills = loader.getSkills();
+  if (skills.diagnostics.length > 0) {
+    throw new Error(
+      `pi: failed to load ${role} skills: ${skills.diagnostics.map((diagnostic) => `${diagnostic.path ?? "(unknown path)"}: ${diagnostic.message}`).join("; ")}`,
+    );
+  }
+  const hashedSkillSources = [...(resources?.skills ?? []), ...(resources?.extensions ?? [])];
+  for (const skill of skills.skills) {
+    if (!hashedSkillSources.some((entry) => containsResolvedPath(entry, skill.filePath))) {
+      throw new Error(`pi: ${role} loaded skill outside its recorded resource manifest: ${skill.filePath}`);
+    }
+  }
+  const unloadedSkills = (resources?.skills ?? []).filter(
+    (entry) => !skills.skills.some((skill) => containsResolvedPath(entry, skill.filePath)),
+  );
+  if (unloadedSkills.length > 0) {
+    throw new Error(`pi: ${role} skill resources loaded no valid skill: ${unloadedSkills.map((entry) => entry.configured_path).join(", ")}`);
+  }
+}
+
+function containsResolvedPath(resource: ResourceManifestEntry, loadedPath: string): boolean {
+  const resolved = path.resolve(loadedPath);
+  if (resource.kind === "file") return resolved === resource.resolved_path;
+  const relative = path.relative(resource.resolved_path, resolved);
+  return relative === "" || (relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative));
 }
 
 function truncate(_key: string, value: unknown): unknown {

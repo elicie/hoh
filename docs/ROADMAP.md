@@ -34,7 +34,7 @@
 
 ## 현재 판단
 
-현재 런타임은 세 역할의 분리 호출, 이전 후보 warm-start, QA용 동결 worktree, 실제 후보 diff, 구조화된 증거, 반복 gap 에스컬레이션, 점진적 역할 컨텍스트, Git 이력, 재개와 논문 실행 계약 고정을 갖췄다. 명시한 Core 계약은 완료됐고, 다음 논문 전체 시스템 작업은 **10번 역할별 pi 확장·스킬 주입**이다. 장기 실행 전에 필요한 운영 작업은 7번으로 별도 유지한다.
+현재 런타임은 세 역할의 분리 호출, 이전 후보 warm-start, QA용 동결 worktree, 실제 후보 diff, 구조화된 증거, 반복 gap 에스컬레이션, 점진적 역할 컨텍스트, 역할별 pi 자원, Git 이력, 재개와 논문 실행 계약 고정을 갖췄다. 명시한 Core 계약과 10번은 완료됐다. 다음 작업은 장기 실행 중 안전한 정지를 먼저 보장하는 **7번 lifecycle·취소 계약**이다.
 
 ## 우선순위 요약
 
@@ -49,7 +49,7 @@
 | 7 | 장기 실행 제어·예산·재시도 | Ops | 부분 완료 | P1 | 1.5~2일 | 4 |
 | 8 | 원장 에스컬레이션 / 후보 복구 | Core / Draft | 8A 완료 / 8B 필요 시 | 유지 | – | 1, 2 |
 | 9 | 점진적 컨텍스트 노출과 프롬프트 정리 | Core | 완료 | 유지 | – | 2, 6 |
-| 10 | 역할별 pi 확장·스킬 주입 | Full | 대기 | P1 | 1일 | 4 |
+| 10 | 역할별 pi 확장·스킬 주입 | Full | 완료 | 유지 | – | 4 |
 | 11 | Developer 컨텍스트·토큰 절감 | Ops | 대기 | P2 | 0.5일 | 9 |
 | 12 | MCP 브리지 | Extension | 필요 시 | P3 | 1일 | 10 |
 | 13 | 샌드박스 실행 가이드 | Ops | 필요 시 | P3 | 1일 | 7 |
@@ -115,7 +115,7 @@
 
 ## 5. 저장소·CI·문서 기준선 — 완료
 
-런타임, PRD coverage, 재현 가능한 검증이 의미 단위 커밋으로 정리돼 있고 CI와 README, 예제가 현재 동작과 맞춰져 있다. 기준일 현재 `npm test` 결과는 65/65 통과다.
+런타임, PRD coverage, 재현 가능한 검증이 의미 단위 커밋으로 정리돼 있고 CI와 README, 예제가 현재 동작과 맞춰져 있다. 기준일 현재 `npm test` 결과는 69/69 통과다.
 
 ## 6. QA에 후보 diff 제공 — 완료
 
@@ -177,15 +177,18 @@ Developer 전후의 전체 Git SHA를 candidate record에 고정하고, QA workt
 - 큰 다국어 fixture의 byte 상한, omitted-body sentinel, 역할별 금지 입력, retry snapshot, mid-loop resume, 후보 commit에서 runtime snapshot 제외, 하네스 프로세스 내부 transcript buffering을 자동 테스트한다.
 - 이전 record에 임의 `external_evaluator` metadata를 넣어도 다음 세 역할의 렌더링 prompt와 snapshot에는 섞이지 않는 부정 테스트가 있다. evaluator 파일·프로세스 자체를 workspace 밖에 두는 완전한 실험 격리는 18번 범위다.
 
-## 10. 역할별 pi 확장·스킬 주입 — 대기
+## 10. 역할별 pi 확장·스킬 주입 — 완료
 
-현재 pi 어댑터는 extensions와 skills를 끈 상태다. 논문의 역할별 하네스 구성 능력을 더 충실히 재현하려면 명시적 경로만 선택적으로 주입할 수 있어야 한다.
+pi의 ambient extensions와 skills는 계속 끈 채, 설정에 명시한 workspace 내부 경로만 전역 또는 역할별로 주입한다. 파일과 디렉터리의 realpath·내용 SHA-256·역할별 extension tool allowlist는 `.hoh/pi-resources.json`과 protocol role contract에 기록된다. 각 역할 호출 직전과 로드 직후에 동일 자원을 재검산한다.
 
-- 전역과 역할별 `extensions`, `skills` 설정
-- 경로 allowlist와 실행 manifest 기록
-- 확장이 등록한 도구에도 기존 역할별 tool allowlist 적용
-- Planner와 QA에 쓰기 도구가 노출되지 않는 통합 테스트
-- `paper` protocol에서도 역할별 도구·스킬은 허용하되, base harness/model/native capability는 같게 유지하고 각 역할의 집합과 버전을 run 시작 시 role contract로 고정
+유지 조건:
+
+- configured path가 workspace 밖이나 `.hoh`로 resolve되는 경우, directory 내부 symbolic link, hashed directory 밖을 가리키거나 advanced glob으로 경계를 우회할 수 있는 package entrypoint를 거부한다.
+- 확장 로드 오류, 유효한 항목을 만들지 못한 extension·skill, skill 진단, 모든 pi built-in(`powershell` 포함)·`submit_*` 도구 충돌, 등록되지 않은 allowlist 도구를 역할 실행 전에 실패시킨다.
+- Planner와 QA에는 Developer 전용 확장 쓰기 도구·스킬이 노출되지 않는 실제 pi SDK 통합 테스트를 유지한다.
+- `paper` resume은 역할별 경로·내용·도구 집합이 달라지면 기존 manifest를 덮어쓰기 전에 거부한다.
+- resource 필드가 없던 legacy `paper` receipt는 현재 manifest가 비어 있을 때만 호환한다. 과거에 무시되던 설정이 새 capability로 활성화되면 새 run을 요구한다.
+- tool allowlist는 모델 호출 권한 경계이지 확장 코드 sandbox가 아니다. 확장은 검토된 신뢰 코드로만 취급한다.
 
 ## 11. Developer 컨텍스트·토큰 절감 — 대기
 
@@ -272,8 +275,8 @@ receipt는 비밀 값 자체를 저장하지 않고, 재현에 필요한 공개 
 
 ## 권장 진행 순서
 
-1. **10번**으로 역할별 하네스 자원을 안전하게 노출한다.
-2. 실제 장기 run 전에 **7번**의 lifecycle·예산·재시도를 추가한다.
+1. 완료된 **10번**의 역할별 하네스 자원 계약을 유지한다.
+2. 다음으로 **7번**의 lifecycle·취소를 먼저 만들고 예산·재시도를 이어서 추가한다.
 3. 초안식 **8B 후보 복구**는 실제 결정적 회귀가 관찰될 때만 별도 opt-in으로 검증한다.
 4. 성능 비교가 필요해졌을 때만 **14번과 18번**을 묶어 실험한다.
 

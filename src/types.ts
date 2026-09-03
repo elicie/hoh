@@ -252,6 +252,31 @@ export interface RolePromptSnapshot {
   created_at: string;
 }
 
+export interface ResourceManifestEntry {
+  /** Exact workspace-relative value supplied in config. */
+  configured_path: string;
+  /** Canonical absolute realpath used by the resource loader. */
+  resolved_path: string;
+  kind: "file" | "directory";
+  /** File bytes, or the canonical recursively hashed directory tree. */
+  sha256: string;
+}
+
+export interface RoleResourceManifest {
+  extensions: ResourceManifestEntry[];
+  skills: ResourceManifestEntry[];
+  /** Exact non-built-in extension tool names enabled for this role. */
+  extension_tools: string[];
+  manifest_sha256: string;
+}
+
+/** Runtime-resolved pi resources used by all three role invocations. */
+export interface HarnessResourceManifest {
+  schema_version: 1;
+  roles: Record<Role, RoleResourceManifest>;
+  manifest_sha256: string;
+}
+
 export interface RoleContractReceipt {
   workspace: "active-read-only" | "active-writer" | "isolated-read-only";
   builtin_tools: string[];
@@ -259,6 +284,8 @@ export interface RoleContractReceipt {
   system_prompt_sha256: string;
   user_prompt_sha256: string;
   output_contract_sha256: string;
+  /** Optional for compatibility with receipts created before role resources were supported. */
+  resources?: RoleResourceManifest;
 }
 
 /** Contract snapshot; paper runs enforce the run-start snapshot on resume. */

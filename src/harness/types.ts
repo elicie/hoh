@@ -7,7 +7,7 @@
  * agent (pi, a CLI, a mock).
  */
 import type { TSchema } from "typebox";
-import type { Role, UsageTotals } from "../types.js";
+import type { HarnessResourceManifest, Role, UsageTotals } from "../types.js";
 
 export type BuiltinTool = "read" | "bash" | "edit" | "write" | "grep" | "find" | "ls";
 
@@ -17,6 +17,8 @@ export const READ_ONLY_TOOLS: readonly BuiltinTool[] = ["read", "grep", "find", 
 export const INSPECT_TOOLS: readonly BuiltinTool[] = ["read", "bash", "grep", "find", "ls"];
 /** Developer: single writer. */
 export const CODING_TOOLS: readonly BuiltinTool[] = ["read", "bash", "edit", "write", "grep", "find", "ls"];
+/** Every pi SDK built-in name extensions must not override, including the Windows-only shell tool. */
+export const PI_BUILTIN_TOOL_NAMES: readonly string[] = [...CODING_TOOLS, "powershell"];
 
 export interface StructuredTool {
   name: string;
@@ -53,6 +55,8 @@ export interface Harness {
   readonly name: string;
   /** Adapter/package version recorded in the immutable protocol receipt. */
   readonly version?: string;
+  /** Exact role resources resolved before run start, when the adapter supports them. */
+  readonly resourceManifest?: HarnessResourceManifest;
   /** Resolve a configured pattern to the concrete model/reasoning identity used by this adapter. */
   resolveModel?(pattern?: string): Promise<string | null>;
   invoke(inv: RoleInvocation): Promise<RoleResult>;

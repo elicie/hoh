@@ -70,7 +70,7 @@ function loadRuntimeVersion(): Promise<string> {
 export async function buildProtocolReceipt(
   config: HohConfig,
   harness: Harness,
-  options: { legacyDefault: boolean; origin: ProtocolReceipt["origin"] },
+  options: { legacyDefault: boolean; origin: ProtocolReceipt["origin"]; includeResourceContracts?: boolean },
 ): Promise<ProtocolReceipt> {
   const harnessVersion = harness.version?.trim() || "unversioned";
   if (config.protocol === "paper" && (harnessVersion === "unversioned" || harnessVersion === "unknown")) {
@@ -81,6 +81,20 @@ export async function buildProtocolReceipt(
   }
 
   const promptHashes = await rolePromptTemplateHashes();
+  const includeResourceContracts = options.includeResourceContracts ?? Boolean(harness.resourceManifest);
+  if (includeResourceContracts && !harness.resourceManifest) {
+    throw new Error(`protocol receipt requires ${harness.name} to expose its resolved role resource manifest`);
+  }
+  const hasResolvedResources = Boolean(
+    harness.resourceManifest &&
+      ROLES.some((role) => {
+        const resources = harness.resourceManifest!.roles[role];
+        return resources.extensions.length > 0 || resources.skills.length > 0 || resources.extension_tools.length > 0;
+      }),
+  );
+  if (config.protocol === "paper" && options.includeResourceContracts === false && hasResolvedResources) {
+    throw new Error("cannot resume a legacy paper run with harness resources that were not fixed in its role contract; start a fresh run");
+  }
   const toolsByRole = {
     planner: { workspace: "active-read-only", builtin: READ_ONLY_TOOLS, structured: plannerTools },
     developer: { workspace: "active-writer", builtin: CODING_TOOLS, structured: [] },
@@ -96,6 +110,7 @@ export async function buildProtocolReceipt(
         system_prompt_sha256: promptHashes[role].system,
         user_prompt_sha256: promptHashes[role].user,
         output_contract_sha256: canonicalSha256(contract.structured),
+        ...(includeResourceContracts ? { resources: structuredClone(harness.resourceManifest!.roles[role]) } : {}),
       };
       return [role, receipt];
     }),

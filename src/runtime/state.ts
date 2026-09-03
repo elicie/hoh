@@ -41,6 +41,10 @@ export class RunPaths {
   get piModels() {
     return path.join(this.root, "pi-models.json");
   }
+  /** exact resolved extension/skill/tool allowlist used by the pi adapter */
+  get piResources() {
+    return path.join(this.root, "pi-resources.json");
+  }
   get ledger() {
     return path.join(this.root, "ledger.json");
   }

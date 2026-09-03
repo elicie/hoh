@@ -5,8 +5,10 @@
 import path from "node:path";
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import type { HohConfig } from "../runtime/config.js";
+import { assertPiResourceManifestCurrent, buildPiResourceManifest } from "../runtime/pi-resources.js";
 import { materializePiModels, type PiModelsJson } from "../runtime/providers.js";
 import { RunPaths } from "../runtime/state.js";
+import type { Role } from "../types.js";
 import { createDemoMockHarness } from "./mock.js";
 import { PiHarness } from "./pi.js";
 import type { Harness } from "./types.js";
@@ -40,6 +42,12 @@ export async function createModelRuntime(config: HohConfig, workspace: string, o
 
 export async function createHarness(config: HohConfig, workspace: string, opts: FactoryOptions = {}): Promise<Harness> {
   if (config.harness === "mock") return createDemoMockHarness();
+  const resourceManifest = await buildPiResourceManifest(config, workspace);
   const { modelRuntime } = await createModelRuntime(config, workspace, opts);
-  return new PiHarness({ agentDir: config.pi.agent_dir, modelRuntime });
+  return new PiHarness({
+    agentDir: config.pi.agent_dir,
+    modelRuntime,
+    resourceManifest,
+    verifyResourceManifest: (role: Role) => assertPiResourceManifestCurrent(resourceManifest, role),
+  });
 }
