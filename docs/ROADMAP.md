@@ -55,7 +55,7 @@
 | 13 | 샌드박스 실행 가이드 | Ops | 필요 시 | P3 | 1일 | 7 |
 | 14 | 추가 하네스 어댑터 | Experiment | Codex 완료 | 유지 | – | 4 |
 | 15 | 입력 receipt와 무결성 검증 | Full | 부분 완료 | P2 | 0.5일 | 3, 4 |
-| 16 | 실행 리포트 확장 | Ops | 부분 완료 | P2 | 1일 | 3, 15 |
+| 16 | 실행 리포트 확장 | Ops | 완료 | 유지 | – | 3, 15 |
 | 17 | 프로젝트 유형별 검증 키트 | Extension | 부분 완료 | P3 | 0.5일/개 | – |
 | 18 | 대조군·ablation·외부 평가 프로토콜 | Experiment | 부분 완료 | P2 | 1~2일 | 4, 14, 15 |
 
@@ -250,13 +250,14 @@ OpenCode 계열 두 번째 어댑터는 Codex로 18번 end-to-end experiment man
 
 receipt는 비밀 값 자체를 저장하지 않고, 재현에 필요한 공개 설정과 해시만 보존한다.
 
-## 16. 실행 리포트 확장 — 부분 완료
+## 16. 실행 리포트 확장 — 완료
 
-현재 루프 상태와 기본 기록 위에 다음 추세를 추가한다.
+생성 Markdown report는 JSON run record, budget ledger, issue ledger, coverage와 loop record를 정본으로 삼는 view다. 다음 항목을 구현하고 fixture 기반 자동 테스트로 계산과 링크를 검증했다.
 
-- 루프별 verified/gap/untested와 원장 전이
-- 역할별 시간·토큰·비용·재시도
-- protocol 종류와 receipt 검증 상태
+- 루프별 verified/gap/untested 추세와 opened/reopened/closed 원장 전이
+- 역할별 시간·토큰·비용, role attempt, transport retry, compaction
+- protocol receipt와 run receipt를 구분한 protocol 종류 및 receipt 검증 상태
+- configured model과 각 역할이 실제 보고한 resolved model의 구분
 - evidence와 QA report의 상대 링크
 
 정적 HTML은 실제로 여러 run을 비교할 필요가 생긴 뒤 추가한다. JSON run record, ledger, coverage를 정본으로 두고 CLI와 Markdown report는 여기서 생성되는 view로 유지한다.
@@ -304,4 +305,4 @@ receipt는 비밀 값 자체를 저장하지 않고, 재현에 필요한 공개 
 3. 초안식 **8B 후보 복구**는 실제 결정적 회귀가 관찰될 때만 별도 opt-in으로 검증한다.
 4. 성능 비교가 필요해졌을 때만 **14번과 18번**을 묶어 실험한다.
 
-12, 13, 16, 17은 구체적인 사용 사례가 생기기 전에는 확장하지 않는다.
+12, 13, 17은 구체적인 사용 사례가 생기기 전에는 확장하지 않는다.

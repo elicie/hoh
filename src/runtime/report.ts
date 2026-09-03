@@ -3,8 +3,28 @@
  * per loop plus the ledger), and `tester_report.md` per loop.
  */
 import { readFile, readdir } from "node:fs/promises";
-import type { BudgetLedger, BudgetMetric, DeveloperRecord, EvidenceBundle, Ledger, PlannerRecord, RunConfig } from "../types.js";
-import { coverageSummary, loadClaimCatalog, loadCoverage, renderCoverageTable } from "./coverage.js";
+import type {
+  BudgetLedger,
+  BudgetMetric,
+  ClaimCatalog,
+  DeveloperRecord,
+  EvidenceBundle,
+  Ledger,
+  PlannerRecord,
+  Role,
+  RoleUsage,
+  RunConfig,
+} from "../types.js";
+import {
+  applyCoverage,
+  claimCatalogSha256,
+  coverageSummary,
+  emptyCoverage,
+  loadClaimCatalog,
+  loadCoverage,
+  renderCoverageTable,
+  type CoverageSummary,
+} from "./coverage.js";
 import { ledgerSummary, renderLedger } from "./ledger.js";
 import { loadBudgetLedger, parseLoopDirName, readJson, RunPaths } from "./state.js";
 
@@ -14,6 +34,20 @@ interface LoopView {
   developer: DeveloperRecord | null;
   evidence: EvidenceBundle | null;
   error: { message: string; role?: string } | null;
+}
+
+export interface RunReportOptions {
+  /** A caller-supplied offline receipt check. Omission is reported as not checked. */
+  receiptVerification?: {
+    readonly ok: boolean;
+    readonly issues?: readonly { readonly code: string }[];
+  };
+}
+
+interface LedgerTransitions {
+  opened: string[];
+  reopened: string[];
+  closed: string[];
 }
 
 export async function collectLoops(paths: RunPaths): Promise<LoopView[]> {
@@ -43,7 +77,12 @@ function fmtTokens(n: number): string {
   return n >= 1_000_000 ? `${(n / 1_000_000).toFixed(2)}M` : n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n);
 }
 
-export async function renderRunReadme(paths: RunPaths, run: RunConfig, ledger: Ledger): Promise<string> {
+export async function renderRunReadme(
+  paths: RunPaths,
+  run: RunConfig,
+  ledger: Ledger,
+  options: RunReportOptions = {},
+): Promise<string> {
   const loops = await collectLoops(paths);
   const budget = await loadBudgetLedger(paths);
   const s = ledgerSummary(ledger);
@@ -59,10 +98,11 @@ export async function renderRunReadme(paths: RunPaths, run: RunConfig, ledger: L
     .join(", ");
   lines.push(`**Run:** \`${run.run_id}\`  `);
   lines.push(
-    `**Protocol:** ${(run.protocol_receipt?.mode ?? run.config.protocol ?? "extended").toUpperCase()}${run.protocol_receipt?.legacy_default ? " (legacy default)" : ""}${run.protocol_receipt?.origin === "legacy_reconstruction" ? " (receipt reconstructed)" : ""}${run.protocol_receipt ? ` — \`${run.protocol_receipt.protocol_sha256}\`` : " (receipt unavailable)"}  `,
+    `**Protocol:** ${(run.protocol_receipt?.mode ?? run.config.protocol ?? "extended").toUpperCase()}${run.protocol_receipt?.legacy_default ? " (legacy default)" : ""}${run.protocol_receipt?.origin === "legacy_reconstruction" ? " (receipt reconstructed)" : ""}${run.protocol_receipt ? ` — \`${run.protocol_receipt.protocol_sha256}\`` : " (protocol receipt unavailable)"}  `,
   );
   lines.push(`**Harness:** ${run.config.harness}  `);
-  lines.push(`**Models:** ${modelLine}  `);
+  lines.push(`**Configured models:** ${modelLine}  `);
+  lines.push(`**Run receipt verification at report generation:** ${formatReceiptVerification(options.receiptVerification)}  `);
   lines.push(`**Workflow:** Project Planner → Developer → QA Tester  `);
   lines.push(`**Iteration budget:** ${run.config.loops}  `);
   if (run.protocol_receipt && run.protocol_receipt.initial_loops !== run.config.loops) {
@@ -82,6 +122,8 @@ export async function renderRunReadme(paths: RunPaths, run: RunConfig, ledger: L
     lines.push(renderCoverageTable(catalog, coverage), "");
   }
 
+  renderLoopTrends(lines, loops, catalog, ledger);
+
   const latest = loops.find((l) => l.developer)?.developer?.candidate_id ?? "none";
   const bestVerified = loops.find((l) => l.evidence?.qa_status === "pass")?.evidence?.candidate_id ?? "none";
   lines.push("---", "", "## Current pointers", "");
@@ -98,35 +140,33 @@ export async function renderRunReadme(paths: RunPaths, run: RunConfig, ledger: L
       "",
     );
     if (l.planner) {
+      const metrics = roleReportMetrics(budget, l.index, "planner", l.planner.usage);
       lines.push("### Project Planner", "", "| Field | Value |", "| --- | --- |");
       lines.push(`| Objective | ${cell(l.planner.objective)} |`);
       lines.push(`| Priorities | ${l.planner.priorities.map((p) => cell(p.name)).join("; ")} |`);
-      lines.push(`| Model | ${l.planner.usage.model ?? "-"} |`);
-      lines.push(`| Tokens | ${fmtTokens(l.planner.usage.totalTokens)} (${l.planner.usage.turns} turns) |`);
-      if (l.planner.usage.compaction_count) lines.push(compactionUsageRow(l.planner.usage));
-      lines.push(`| Duration / retries | ${formatDuration(l.planner.usage.duration_ms)} / ${l.planner.usage.retry_count ?? 0} |`, "");
+      lines.push(`| Resolved model | ${l.planner.usage.model ?? "-"} |`);
+      lines.push(...roleUsageRows(metrics), "");
     }
     if (l.developer) {
+      const metrics = roleReportMetrics(budget, l.index, "developer", l.developer.usage);
       lines.push("### Developer", "", "| Field | Value |", "| --- | --- |");
       lines.push(`| Commit | ${l.developer.commit ? `\`${l.developer.commit.slice(0, 12)}\`` : "no changes"} |`);
       lines.push(`| Changed paths | ${l.developer.changed_paths.length} |`);
       lines.push(`| Violations | ${l.developer.violations.length ? l.developer.violations.map(cell).join("; ") : "none"} |`);
-      lines.push(`| Model | ${l.developer.usage.model ?? "-"} |`);
-      lines.push(`| Tokens | ${fmtTokens(l.developer.usage.totalTokens)} (${l.developer.usage.turns} turns) |`);
-      if (l.developer.usage.compaction_count) lines.push(compactionUsageRow(l.developer.usage));
-      lines.push(`| Duration / retries | ${formatDuration(l.developer.usage.duration_ms)} / ${l.developer.usage.retry_count ?? 0} |`, "");
+      lines.push(`| Resolved model | ${l.developer.usage.model ?? "-"} |`);
+      lines.push(...roleUsageRows(metrics), "");
     }
     if (l.evidence) {
       const e = l.evidence;
+      const metrics = roleReportMetrics(budget, l.index, "tester", e.usage);
       lines.push("### QA Tester", "", "| Field | Value |", "| --- | --- |");
       lines.push(`| Status | ${e.qa_status.toUpperCase()} |`);
       lines.push(`| Frozen candidate | ${e.frozen ? "yes" : "NO (mutated during QA)"} |`);
       lines.push(`| Checks | ${e.checks.map((c) => `${c.name}=${c.status}`).join(", ") || "none"} |`);
       lines.push(`| Verified / gaps | ${e.verified_records.length} / ${e.gap_records.length} |`);
-      lines.push(`| Model | ${e.usage.model ?? "-"} |`);
-      lines.push(`| Tokens | ${fmtTokens(e.usage.totalTokens)} (${e.usage.turns} turns) |`);
-      if (e.usage.compaction_count) lines.push(compactionUsageRow(e.usage));
-      lines.push(`| Duration / retries | ${formatDuration(e.usage.duration_ms)} / ${e.usage.retry_count ?? 0} |`, "");
+      lines.push(`| Records | ${loopRecordLinks(l.index)} |`);
+      lines.push(`| Resolved model | ${e.usage.model ?? "-"} |`);
+      lines.push(...roleUsageRows(metrics), "");
       if (e.gap_records.length) {
         lines.push("#### Findings", "", "| ID | Severity | Claim |", "| --- | --- | --- |");
         for (const g of e.gap_records) lines.push(`| \`${g.claim_id}\` | ${g.severity ?? "-"} | ${cell(g.claim)} |`);
@@ -140,7 +180,145 @@ export async function renderRunReadme(paths: RunPaths, run: RunConfig, ledger: L
   return lines.join("\n");
 }
 
-function compactionUsageRow(usage: import("../types.js").RoleUsage): string {
+function renderLoopTrends(lines: string[], loops: LoopView[], catalog: ClaimCatalog | null, ledger: Ledger): void {
+  const transitions = ledgerTransitionsByLoop(ledger);
+  const coverage = loopCoverageTrends(loops, catalog);
+  lines.push("---", "", "## Loop trends", "");
+  lines.push(
+    "| Loop | Verified | Gap | Untested | Opened | Reopened | Closed | Records |",
+    "| ---: | ---: | ---: | ---: | --- | --- | --- | --- |",
+  );
+  for (const loop of [...loops].sort((a, b) => a.index - b.index)) {
+    const counts = coverage.get(loop.index);
+    const delta = transitions.get(loop.index) ?? emptyLedgerTransitions();
+    lines.push(
+      `| ${String(loop.index).padStart(2, "0")} | ${counts?.verified ?? "-"} | ${counts?.gap ?? "-"} | ${counts?.untested ?? "-"} | ${formatIds(delta.opened)} | ${formatIds(delta.reopened)} | ${formatIds(delta.closed)} | ${loop.evidence ? loopRecordLinks(loop.index) : "-"} |`,
+    );
+  }
+  if (!loops.length) lines.push("| - | - | - | - | - | - | - | - |");
+  lines.push("");
+}
+
+function loopCoverageTrends(loops: LoopView[], catalog: ClaimCatalog | null): Map<number, CoverageSummary> {
+  const trends = new Map<number, CoverageSummary>();
+  if (!catalog) return trends;
+  let coverage = emptyCoverage(catalog);
+  const catalogHash = claimCatalogSha256(catalog);
+  for (const loop of [...loops].sort((a, b) => a.index - b.index)) {
+    if (!loop.evidence || loop.evidence.claim_catalog_sha256 !== catalogHash) continue;
+    coverage = applyCoverage(catalog, coverage, loop.evidence);
+    trends.set(loop.index, coverageSummary(catalog, coverage));
+  }
+  return trends;
+}
+
+function ledgerTransitionsByLoop(ledger: Ledger): Map<number, LedgerTransitions> {
+  const byLoop = new Map<number, LedgerTransitions>();
+  const at = (loop: number) => {
+    const current = byLoop.get(loop) ?? emptyLedgerTransitions();
+    byLoop.set(loop, current);
+    return current;
+  };
+  for (const issue of Object.values(ledger.issues)) {
+    for (const event of issue.history) {
+      if (event.status === "open") at(event.loop).opened.push(issue.id);
+      if (event.status === "regressed") at(event.loop).reopened.push(issue.id);
+      if (event.status === "closed") at(event.loop).closed.push(issue.id);
+    }
+  }
+  for (const delta of byLoop.values()) {
+    delta.opened.sort();
+    delta.reopened.sort();
+    delta.closed.sort();
+  }
+  return byLoop;
+}
+
+function emptyLedgerTransitions(): LedgerTransitions {
+  return { opened: [], reopened: [], closed: [] };
+}
+
+function formatIds(ids: string[]): string {
+  return ids.length ? ids.map(cell).join(", ") : "-";
+}
+
+function loopRecordLinks(loopIndex: number): string {
+  const loop = `loop-${String(loopIndex).padStart(2, "0")}`;
+  return `[evidence](iterations/${loop}/evidence.json) / [QA report](iterations/${loop}/tester_report.md)`;
+}
+
+function formatReceiptVerification(verification: RunReportOptions["receiptVerification"]): string {
+  if (!verification) return "NOT CHECKED";
+  if (verification.ok) return "VERIFIED";
+  const codes = [...new Set((verification.issues ?? []).map((issue) => issue.code))].sort();
+  const count = verification.issues?.length;
+  const detail = codes.length ? `: ${codes.join(", ")}` : "";
+  return `FAILED (${count === undefined ? "unknown" : count} issue${count === 1 ? "" : "s"}${detail})`;
+}
+
+interface RoleReportMetrics {
+  attempts: number;
+  usage: RoleUsage;
+}
+
+function roleReportMetrics(
+  budget: BudgetLedger | null,
+  loopIndex: number,
+  role: Role,
+  fallback: RoleUsage,
+): RoleReportMetrics {
+  const attempts = budget?.attempts.filter((attempt) => attempt.loop_index === loopIndex && attempt.role === role) ?? [];
+  const charged = attempts.flatMap((attempt) => (attempt.usage ? [attempt.usage] : []));
+  if (!charged.length) return { attempts: attempts.length || 1, usage: fallback };
+  const accounted = Object.values(budget?.loops ?? {}).find((loop) => loop.loop_index === loopIndex)?.roles[role];
+  const usage: RoleUsage = {
+    input: 0,
+    output: 0,
+    cacheRead: 0,
+    cacheWrite: 0,
+    totalTokens: 0,
+    cost: 0,
+    turns: 0,
+    duration_ms: 0,
+  };
+  for (const item of charged) {
+    usage.input += item.input;
+    usage.output += item.output;
+    usage.cacheRead += item.cacheRead;
+    usage.cacheWrite += item.cacheWrite;
+    usage.totalTokens += item.totalTokens;
+    usage.cost += item.cost;
+    usage.turns += item.turns;
+    usage.duration_ms += item.duration_ms;
+    usage.retry_count = (usage.retry_count ?? 0) + (item.retry_count ?? 0);
+    usage.compaction_count = (usage.compaction_count ?? 0) + (item.compaction_count ?? 0);
+    usage.compaction_tokens_before = (usage.compaction_tokens_before ?? 0) + (item.compaction_tokens_before ?? 0);
+    if (item.compaction_estimated_tokens_after !== undefined) {
+      usage.compaction_estimated_tokens_after = item.compaction_estimated_tokens_after;
+    }
+  }
+  if (accounted) {
+    usage.duration_ms = accounted.elapsed_ms;
+    usage.totalTokens = accounted.total_tokens;
+    usage.cost = accounted.cost;
+  }
+  usage.model = fallback.model;
+  return { attempts: attempts.length, usage };
+}
+
+function roleUsageRows(metrics: RoleReportMetrics): string[] {
+  return [
+    `| Duration | ${formatDuration(metrics.usage.duration_ms)} |`,
+    `| Tokens | ${fmtTokens(metrics.usage.totalTokens)} (${metrics.usage.turns} turn${metrics.usage.turns === 1 ? "" : "s"}) |`,
+    `| Cost | ${formatCost(metrics.usage.cost)} |`,
+    `| Role attempts | ${metrics.attempts} |`,
+    `| Transport retries | ${metrics.usage.retry_count ?? 0} |`,
+    compactionUsageRow(metrics.usage),
+  ];
+}
+
+function compactionUsageRow(usage: RoleUsage): string {
+  if (!usage.compaction_count) return "| Compactions | 0 |";
   const before = fmtTokens(usage.compaction_tokens_before ?? 0);
   const after = usage.compaction_estimated_tokens_after === undefined ? "unknown" : fmtTokens(usage.compaction_estimated_tokens_after);
   return `| Compactions | ${usage.compaction_count ?? 0} (${before} before → ${after} estimated after) |`;
@@ -149,7 +327,7 @@ function compactionUsageRow(usage: import("../types.js").RoleUsage): string {
 function renderBudgetSummary(lines: string[], budget: BudgetLedger): void {
   lines.push("---", "", "## Resource budget ledger", "");
   lines.push("| Field | Value |", "| --- | --- |");
-  lines.push(`| Status | ${budget.status.toUpperCase()} |`);
+  lines.push(`| Runtime status | ${budget.status.toUpperCase()} |`);
   lines.push(`| Run elapsed | ${formatDuration(budget.totals.elapsed_ms)} |`);
   lines.push(`| Run tokens | ${fmtTokens(budget.totals.total_tokens)} |`);
   lines.push(`| Run cost | ${formatCost(budget.totals.cost)} |`);
