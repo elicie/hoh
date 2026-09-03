@@ -168,7 +168,7 @@ iterations/loop-NN/
 
 ## Configuration
 
-Protocol, models, providers, harness, budget, checks and timeouts live in a config file,
+Protocol, models, providers, harness, budget, checks, retry and timeouts live in a config file,
 not in CLI flags. This repository ships `hoh.config.json`; edit it (or point
 `--config` at another file). Providers are OpenAI-compatible endpoints; model
 lists can be discovered from `GET {base_url}/models`. The root config uses
@@ -202,7 +202,14 @@ lists can be discovered from `GET {base_url}/models`. The root config uses
   "loops": 3,
   "artifact_dir": ".",
   "checks": [{ "name": "build", "command": "godot --headless --path . --quit", "timeout_min": 5 }],
-  "timeouts": { "role_min": 60, "check_min": 10 },
+  "timeouts": {
+    "role_min": 60,
+    "check_min": 10,
+    "provider_ms": 3600000,
+    "output_idle_ms": 300000,
+    "websocket_connect_ms": 15000
+  },
+  "retry": { "enabled": true, "max_retries": 3, "base_delay_ms": 2000, "max_delay_ms": 60000 },
   "pi": {}
 }
 ```
@@ -224,7 +231,10 @@ lists can be discovered from `GET {base_url}/models`. The root config uses
 | `artifact_dir` | artifact directory inside the workspace (`.` = whole workspace minus `.hoh/`) |
 | `worktree_setup` | optional command run once per QA attempt in the isolated candidate worktree root before the checks (e.g. `cd tools && npm ci`), with the `HOH_*` check environment; recorded as check `setup`, whose failure blocks QA. It must not create or change non-ignored files in `artifact_dir`, or the candidate hash check invalidates QA |
 | `checks[]` | deterministic commands run on the frozen candidate before QA (`name`, `command`, optional `timeout_min`) |
-| `timeouts.role_min` / `check_min` | wall-clock limits |
+| `timeouts.role_min` / `check_min` | role and deterministic-check wall-clock limits |
+| `timeouts.provider_ms` | per-provider-request ceiling; pi SDK retries stay disabled so the same pi session owns retry classification |
+| `timeouts.output_idle_ms` / `websocket_connect_ms` | stream-silence watchdog and WebSocket handshake ceiling |
+| `retry.*` | same-session transient retry policy: enablement, retry count, exponential-backoff base and maximum accepted server delay |
 | `pi.agent_dir` | pi's credential/models directory (default `~/.pi/agent`) |
 | `pi.extensions` / `pi.skills` | reviewed workspace-relative resource paths loaded for every role; ambient pi discovery remains disabled |
 | `pi.roles.<role>.extensions` / `skills` | additional resources loaded only for `planner`, `developer`, or `tester` |

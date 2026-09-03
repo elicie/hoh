@@ -10,7 +10,7 @@ export interface FakeToolCall {
   name: string;
   arguments: Record<string, unknown>;
 }
-export type FakeStep = { tool: FakeToolCall } | { text: string };
+export type FakeStep = { tool: FakeToolCall } | { text: string } | { error: { status: number; message: string; retryAfterMs?: number } };
 
 export interface FakeRequestView {
   role: "planner" | "developer" | "tester" | "unknown";
@@ -77,6 +77,14 @@ export async function startFakeOpenAI(script: FakeScript, opts: { models?: strin
       };
       requests.push(view);
       const out = script(view);
+      if ("error" in out) {
+        res.writeHead(out.error.status, {
+          "content-type": "application/json",
+          ...(out.error.retryAfterMs === undefined ? {} : { "retry-after-ms": String(out.error.retryAfterMs) }),
+        });
+        res.end(JSON.stringify({ error: { message: out.error.message, type: "server_error" } }));
+        return;
+      }
       const id = `chatcmpl-${Date.now()}`;
       const created = Math.floor(Date.now() / 1000);
       const usage = { prompt_tokens: 100, completion_tokens: 20, total_tokens: 120 };
@@ -139,11 +147,31 @@ export async function startFakeOpenAI(script: FakeScript, opts: { models?: strin
       }
     });
   });
-  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  await listenAtOrAbove(server, 10_001);
   const { port } = server.address() as AddressInfo;
   return {
     baseUrl: `http://127.0.0.1:${port}/v1`,
     requests,
     close: () => new Promise((resolve) => server.close(() => resolve())),
   };
+}
+
+async function listenAtOrAbove(server: http.Server, port: number): Promise<void> {
+  await new Promise<void>((resolve, reject) => {
+    const onError = (error: NodeJS.ErrnoException) => {
+      server.off("listening", onListening);
+      if (error.code === "EADDRINUSE" && port < 11_000) {
+        void listenAtOrAbove(server, port + 1).then(resolve, reject);
+      } else {
+        reject(error);
+      }
+    };
+    const onListening = () => {
+      server.off("error", onError);
+      resolve();
+    };
+    server.once("error", onError);
+    server.once("listening", onListening);
+    server.listen(port, "127.0.0.1");
+  });
 }

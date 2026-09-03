@@ -43,6 +43,20 @@ export interface PiHarnessOptions {
   resourceManifest?: HarnessResourceManifest;
   /** Re-hash one role's resources immediately before and after loading them. */
   verifyResourceManifest?: (role: Role) => Promise<void>;
+  /** Runtime-owned transport policy. These overrides take precedence over ambient pi settings. */
+  sessionPolicy?: PiSessionPolicy;
+}
+
+export interface PiSessionPolicy {
+  retry: {
+    enabled: boolean;
+    maxRetries: number;
+    baseDelayMs: number;
+    maxRetryDelayMs: number;
+  };
+  providerTimeoutMs: number;
+  outputIdleTimeoutMs: number;
+  websocketConnectTimeoutMs: number;
 }
 
 const MAX_STRING = 20_000;
@@ -140,6 +154,27 @@ export class PiHarness implements Harness {
       }),
     );
 
+    const settingsManager = SettingsManager.create(inv.cwd, agentDir);
+    if (this.opts.sessionPolicy) {
+      const policy = this.opts.sessionPolicy;
+      settingsManager.applyOverrides({
+        retry: {
+          enabled: policy.retry.enabled,
+          maxRetries: policy.retry.maxRetries,
+          baseDelayMs: policy.retry.baseDelayMs,
+          // Keep SDK retries disabled so pi owns classification, backoff,
+          // transcript events, and same-session continuation.
+          provider: {
+            timeoutMs: policy.providerTimeoutMs,
+            maxRetries: 0,
+            maxRetryDelayMs: policy.retry.maxRetryDelayMs,
+          },
+        },
+        httpIdleTimeoutMs: policy.outputIdleTimeoutMs,
+        websocketConnectTimeoutMs: policy.websocketConnectTimeoutMs,
+      });
+    }
+
     const { session } = await createAgentSession({
       cwd: inv.cwd,
       agentDir,
@@ -150,7 +185,7 @@ export class PiHarness implements Harness {
       customTools,
       resourceLoader: loader,
       sessionManager: SessionManager.inMemory(inv.cwd),
-      settingsManager: SettingsManager.create(inv.cwd, agentDir),
+      settingsManager,
     });
 
     const usedModel = session.model
@@ -161,13 +196,15 @@ export class PiHarness implements Harness {
     let finalText = "";
     let lastError: string | undefined;
     let lastStop: string | undefined;
+    let retryCount = 0;
     inv.onTranscript?.(
-      `${JSON.stringify({ ts: new Date().toISOString(), type: "hoh_invocation", role: inv.role, loop: inv.loopIndex, cwd: inv.cwd, tools: allowedTools, model: usedModel })}\n`,
+      `${JSON.stringify({ ts: new Date().toISOString(), type: "hoh_invocation", role: inv.role, loop: inv.loopIndex, cwd: inv.cwd, tools: allowedTools, model: usedModel, transport_policy: this.opts.sessionPolicy })}\n`,
     );
 
     const unsubscribe = session.subscribe((event: any) => {
       if (event.type === "message_update") return;
       inv.onTranscript?.(`${JSON.stringify({ ts: new Date().toISOString(), ...event }, truncate)}\n`);
+      if (event.type === "auto_retry_start") retryCount += 1;
       if (event.type === "turn_end") turns += 1;
       if (event.type === "message_end" && event.message?.role === "assistant") {
         const m = event.message;
@@ -202,7 +239,7 @@ export class PiHarness implements Harness {
     if (lastStop === "error") {
       throw new Error(`pi: model error during ${inv.role}: ${lastError ?? "unknown error"}`);
     }
-    return { finalText, submissions, usage, turns, model: usedModel };
+    return { finalText, submissions, usage, turns, model: usedModel, ...(retryCount > 0 ? { retryCount } : {}) };
   }
 }
 

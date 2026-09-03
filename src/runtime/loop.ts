@@ -716,6 +716,7 @@ interface TranscriptCapture {
 async function invokeRole(ctx: Ctx, inv: RuntimeRoleInvocation, requiredTool?: string): Promise<InvokeOutcome> {
   const started = Date.now();
   const total: RoleUsage = { ...emptyUsage(), turns: 0, duration_ms: 0 };
+  let retryCount = 0;
   let attempts = 0;
   let result: RoleResult = { finalText: "", submissions: {}, usage: emptyUsage(), turns: 0 };
   let finalUserPrompt = inv.prompt;
@@ -749,6 +750,7 @@ async function invokeRole(ctx: Ctx, inv: RuntimeRoleInvocation, requiredTool?: s
       }
       for (const k of ["input", "output", "cacheRead", "cacheWrite", "totalTokens", "cost"] as const) total[k] += result.usage[k] ?? 0;
       total.turns += result.turns;
+      retryCount += result.retryCount ?? 0;
       if (result.model) total.model = result.model;
       if (!requiredTool || (result.submissions[requiredTool]?.length ?? 0) > 0 || parseJsonBlock(result.finalText)) break;
       ctx.log(`[loop ${pad(inv.loopIndex)}] ${inv.role}: no ${requiredTool} call; retrying (${attempts}/${maxAttempts})`);
@@ -759,6 +761,7 @@ async function invokeRole(ctx: Ctx, inv: RuntimeRoleInvocation, requiredTool?: s
     throw failure;
   }
   total.duration_ms = Date.now() - started;
+  if (retryCount > 0) total.retry_count = retryCount;
   return { result, attempts, usage: total, finalUserPrompt, transcript };
 }
 

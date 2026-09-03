@@ -45,7 +45,16 @@
   "checks": [],
   "timeouts": {
     "role_min": 60,
-    "check_min": 10
+    "check_min": 10,
+    "provider_ms": 3600000,
+    "output_idle_ms": 300000,
+    "websocket_connect_ms": 15000
+  },
+  "retry": {
+    "enabled": true,
+    "max_retries": 3,
+    "base_delay_ms": 2000,
+    "max_delay_ms": 60000
   },
   "pi": {}
 }

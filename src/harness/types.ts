@@ -51,6 +51,8 @@ export interface RoleResult {
   submissions: Record<string, unknown[]>;
   usage: UsageTotals;
   turns: number;
+  /** Same-session transient retries reported by the adapter. Detailed events remain in the transcript. */
+  retryCount?: number;
 }
 
 export interface Harness {

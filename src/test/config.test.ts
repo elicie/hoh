@@ -19,6 +19,8 @@ test("config: merge, per-role model fallback, validation", async () => {
   assert.equal(modelForRole(c, "developer"), "a/x");
   assert.equal(modelForRole(c, "tester"), "b/y:high");
   assert.equal(c.protocol, "extended", "missing protocol preserves legacy behavior");
+  assert.equal(c.retry.max_retries, 3);
+  assert.equal(c.timeouts.output_idle_ms, 300_000);
   assert.deepEqual(validateConfig(c), []);
 
   const paper = mergeConfig(DEFAULT_CONFIG, { protocol: "paper", harness: "mock", models: { default: "a/x" } });
@@ -42,6 +44,20 @@ test("config: merge, per-role model fallback, validation", async () => {
   assert.ok(errors.some((e) => /artifact_dir/.test(e)));
   assert.ok(errors.some((e) => /models.default/.test(e)), "pi harness requires a model");
   assert.ok(errors.some((e) => /checks\[0\].name/.test(e)));
+  assert.ok(
+    validateConfig(
+      mergeConfig(DEFAULT_CONFIG, {
+        harness: "mock",
+        retry: { max_retries: -1 },
+        timeouts: { output_idle_ms: 0 },
+      }),
+    ).some((e) => /retry\.max_retries/.test(e)),
+  );
+  assert.ok(
+    validateConfig(mergeConfig(DEFAULT_CONFIG, { harness: "mock", timeouts: { output_idle_ms: 0 } })).some((e) =>
+      /timeouts\.output_idle_ms/.test(e),
+    ),
+  );
 
   for (const artifact_dir of ["nested/../../outside", ".hoh", "./.hoh/iterations", "line\nbreak"]) {
     assert.ok(
@@ -114,6 +130,8 @@ test("config: per-role models reach the harness and the run record; stored confi
     assert.equal(stored.loops, 1);
     assert.equal(stored.timeouts.role_min, 5);
     assert.equal(stored.timeouts.check_min, 10, "unspecified values fall back to defaults");
+    assert.equal(stored.timeouts.provider_ms, 3_600_000);
+    assert.equal(stored.retry.max_retries, 3);
     const run = (await readJson<RunConfig>(paths.runJson))!;
     assert.equal(run.config_source, "test");
     assert.equal(run.protocol_receipt?.mode, "extended");

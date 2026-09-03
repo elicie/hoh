@@ -49,5 +49,16 @@ export async function createHarness(config: HohConfig, workspace: string, opts: 
     modelRuntime,
     resourceManifest,
     verifyResourceManifest: (role: Role) => assertPiResourceManifestCurrent(resourceManifest, role),
+    sessionPolicy: {
+      retry: {
+        enabled: config.retry.enabled,
+        maxRetries: config.retry.max_retries,
+        baseDelayMs: config.retry.base_delay_ms,
+        maxRetryDelayMs: config.retry.max_delay_ms,
+      },
+      providerTimeoutMs: config.timeouts.provider_ms,
+      outputIdleTimeoutMs: config.timeouts.output_idle_ms,
+      websocketConnectTimeoutMs: config.timeouts.websocket_connect_ms,
+    },
   });
 }

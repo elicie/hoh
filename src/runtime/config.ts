@@ -81,6 +81,17 @@ export interface PiConfig {
   roles?: Partial<Record<Role, PiRoleResourcesConfig>>;
 }
 
+export interface RetryConfig {
+  /** Agent-level retries for transient transport failures, rate limits, and 5xx responses. */
+  enabled: boolean;
+  /** Number of retries after the initial request. */
+  max_retries: number;
+  /** Initial exponential-backoff delay. */
+  base_delay_ms: number;
+  /** Maximum provider-requested retry delay accepted by the adapter. */
+  max_delay_ms: number;
+}
+
 export interface HohConfig {
   /** paper = fixed harness-model/runtime contract; extended = product-specific overrides */
   protocol: ExecutionProtocol;
@@ -104,7 +115,14 @@ export interface HohConfig {
     role_min: number;
     /** default per-check limit */
     check_min: number;
+    /** per-provider-request ceiling */
+    provider_ms: number;
+    /** maximum silence between provider stream events */
+    output_idle_ms: number;
+    /** maximum WebSocket connect/open handshake wait */
+    websocket_connect_ms: number;
   };
+  retry: RetryConfig;
   pi: PiConfig;
 }
 
@@ -118,7 +136,14 @@ export const DEFAULT_CONFIG: HohConfig = {
   artifact_dir: ".",
   worktree_setup: undefined,
   checks: [],
-  timeouts: { role_min: 60, check_min: 10 },
+  timeouts: {
+    role_min: 60,
+    check_min: 10,
+    provider_ms: 60 * 60_000,
+    output_idle_ms: 5 * 60_000,
+    websocket_connect_ms: 15_000,
+  },
+  retry: { enabled: true, max_retries: 3, base_delay_ms: 2_000, max_delay_ms: 60_000 },
   pi: {},
 };
 
@@ -142,6 +167,7 @@ export function mergeConfig(base: HohConfig, patch: ConfigPatch | null | undefin
     worktree_setup: patch.worktree_setup ?? base.worktree_setup,
     checks: patch.checks ? patch.checks.map((c) => ({ ...c })) : base.checks.map((c) => ({ ...c })),
     timeouts: { ...base.timeouts, ...stripUndefined(patch.timeouts ?? {}) },
+    retry: { ...base.retry, ...stripUndefined(patch.retry ?? {}) },
     pi: mergePiConfig(base.pi, patch.pi),
   };
   if (merged.pi?.agent_dir) merged.pi.agent_dir = expandHome(merged.pi.agent_dir);
@@ -259,6 +285,18 @@ export function validateConfig(c: HohConfig): string[] {
     });
   if (!(c.timeouts.role_min > 0)) errors.push("timeouts.role_min must be > 0");
   if (!(c.timeouts.check_min > 0)) errors.push("timeouts.check_min must be > 0");
+  if (!Number.isFinite(c.timeouts.provider_ms) || c.timeouts.provider_ms <= 0) errors.push("timeouts.provider_ms must be > 0");
+  if (!Number.isFinite(c.timeouts.output_idle_ms) || c.timeouts.output_idle_ms <= 0) errors.push("timeouts.output_idle_ms must be > 0");
+  if (!Number.isFinite(c.timeouts.websocket_connect_ms) || c.timeouts.websocket_connect_ms <= 0) {
+    errors.push("timeouts.websocket_connect_ms must be > 0");
+  }
+  if (!c.retry || typeof c.retry !== "object" || Array.isArray(c.retry)) errors.push("retry must be an object");
+  else {
+    if (typeof c.retry.enabled !== "boolean") errors.push("retry.enabled must be a boolean");
+    if (!Number.isInteger(c.retry.max_retries) || c.retry.max_retries < 0) errors.push("retry.max_retries must be a non-negative integer");
+    if (!Number.isFinite(c.retry.base_delay_ms) || c.retry.base_delay_ms < 0) errors.push("retry.base_delay_ms must be >= 0");
+    if (!Number.isFinite(c.retry.max_delay_ms) || c.retry.max_delay_ms < 0) errors.push("retry.max_delay_ms must be >= 0");
+  }
   validatePiConfig(c.pi, errors);
   return errors;
 }

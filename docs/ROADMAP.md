@@ -138,14 +138,14 @@ Developer 전후의 전체 Git SHA를 candidate record에 고정하고, QA workt
 - `runHoh`의 `AbortSignal`을 loop-0 claim 작성, 모든 역할 호출, setup과 deterministic check까지 전달한다.
 - 외부 취소 시 pi session을 abort하고 check의 전체 process group을 종료한다.
 - Tester 취소를 QA 실패나 runtime error로 기록하지 않으며 임시 QA worktree와 환경 경계를 정리한다.
+- pi의 ambient 설정보다 우선하는 provider request, stream idle, WebSocket connect timeout과 transient retry 횟수·지수 backoff를 run config에 고정한다. provider SDK 자체 retry는 0으로 두어 같은 pi session이 timeout·5xx·연결 끊김만 분류하고 이어간다.
+- `auto_retry_start`·`auto_retry_end` 전체 이력은 역할 transcript에, retry 횟수와 경과 시간은 역할 record와 Markdown report에 보존한다.
 
 남은 작업:
 
 - `run --detach`, PID·로그 기록, `stop`, `logs -f`, 현재 역할·경과 시간 표시
 - CLI SIGTERM·stop 요청을 위 취소 계약에 연결
 - 역할·루프·run 단위 토큰/비용/시간 예산과 `budget_exhausted` 종료 상태
-- transport timeout, 5xx, 연결 끊김에 한정한 역할 단위 재시도와 지수 backoff
-- 출력 정지 watchdog과 재시도 이력 보존
 
 모델이 낸 QA 실패나 개발 결과를 전송 오류처럼 자동 재시도하지 않는다. 사람 체크포인트는 `extended` 프로토콜에서만 선택적으로 제공한다.
 

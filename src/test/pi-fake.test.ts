@@ -50,10 +50,15 @@ export default function roleTools(pi) {
     path.join(resourcesDir, "developer-skill", "SKILL.md"),
     "---\nname: developer-fixture\ndescription: HOH_DEVELOPER_SKILL_MARKER\n---\n\nDeveloper-only fixture instructions.\n",
   );
+  let plannerTransientFailure = true;
   const server = await startFakeOpenAI(
     (view): FakeStep => {
     switch (view.role) {
       case "planner":
+        if (plannerTransientFailure) {
+          plannerTransientFailure = false;
+          return { error: { status: 503, message: "temporary fixture outage" } };
+        }
         if (view.step === 0) {
           // Read-only role: a write must be rejected by the allowlist before the plan is submitted.
           return { tool: { name: "write", arguments: { path: "planner-should-not-write.txt", content: "x" } } };
@@ -168,6 +173,7 @@ export default function roleTools(pi) {
       },
     },
     models: { default: "fake/fake-model", tester: "fake/fake-tester" },
+    retry: { max_retries: 2, base_delay_ms: 1 },
   });
   const harness = await createHarness(config, ws, { runtimeOptions: { refreshOnCreate: false } });
 
@@ -201,6 +207,7 @@ export default function roleTools(pi) {
     assert.equal(server.requests.find((r) => r.role === "planner")!.model, "fake-model");
     assert.equal(server.requests.find((r) => r.role === "tester")!.model, "fake-tester");
     assert.equal(planner.usage.model, "fake/fake-model");
+    assert.equal(planner.usage.retry_count, 1, "the transient 503 is retried inside the same pi session");
     assert.equal(evidence.usage.model, "fake/fake-tester:medium", "reasoning model gets pi's default thinking level");
 
     // Tool allowlists as seen by the model.
@@ -242,6 +249,10 @@ export default function roleTools(pi) {
     assert.equal(transcript.split("\n").includes("PI_DEVELOPER_TRANSCRIPT_SENTINEL"), false);
     const testerTranscript = await readFile(paths.transcript(1, "tester"), "utf8");
     assert.equal(testerTranscript.split("\n").includes("PI_TESTER_TRANSCRIPT_SENTINEL"), false);
+    const plannerTranscript = await readFile(paths.transcript(1, "planner"), "utf8");
+    assert.match(plannerTranscript, /"type":"auto_retry_start"/);
+    assert.match(plannerTranscript, /"type":"auto_retry_end"/);
+    assert.match(plannerTranscript, /"transport_policy":\{"retry":\{"enabled":true,"maxRetries":2,"baseDelayMs":1/);
   } finally {
     if (previousTmpDir === undefined) delete process.env.TMPDIR;
     else process.env.TMPDIR = previousTmpDir;

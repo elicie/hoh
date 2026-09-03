@@ -234,6 +234,8 @@ export interface UsageTotals {
 export interface RoleUsage extends UsageTotals {
   turns: number;
   duration_ms: number;
+  /** Same-session transient transport retries; detailed lifecycle events are in the role transcript. */
+  retry_count?: number;
   /** model actually used by the harness for this role, e.g. "anthropic/claude-opus-5:high" */
   model?: string;
 }

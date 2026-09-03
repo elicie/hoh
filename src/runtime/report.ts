@@ -100,7 +100,8 @@ export async function renderRunReadme(paths: RunPaths, run: RunConfig, ledger: L
       lines.push(`| Objective | ${cell(l.planner.objective)} |`);
       lines.push(`| Priorities | ${l.planner.priorities.map((p) => cell(p.name)).join("; ")} |`);
       lines.push(`| Model | ${l.planner.usage.model ?? "-"} |`);
-      lines.push(`| Tokens | ${fmtTokens(l.planner.usage.totalTokens)} (${l.planner.usage.turns} turns) |`, "");
+      lines.push(`| Tokens | ${fmtTokens(l.planner.usage.totalTokens)} (${l.planner.usage.turns} turns) |`);
+      lines.push(`| Duration / retries | ${formatDuration(l.planner.usage.duration_ms)} / ${l.planner.usage.retry_count ?? 0} |`, "");
     }
     if (l.developer) {
       lines.push("### Developer", "", "| Field | Value |", "| --- | --- |");
@@ -108,7 +109,8 @@ export async function renderRunReadme(paths: RunPaths, run: RunConfig, ledger: L
       lines.push(`| Changed paths | ${l.developer.changed_paths.length} |`);
       lines.push(`| Violations | ${l.developer.violations.length ? l.developer.violations.map(cell).join("; ") : "none"} |`);
       lines.push(`| Model | ${l.developer.usage.model ?? "-"} |`);
-      lines.push(`| Tokens | ${fmtTokens(l.developer.usage.totalTokens)} (${l.developer.usage.turns} turns) |`, "");
+      lines.push(`| Tokens | ${fmtTokens(l.developer.usage.totalTokens)} (${l.developer.usage.turns} turns) |`);
+      lines.push(`| Duration / retries | ${formatDuration(l.developer.usage.duration_ms)} / ${l.developer.usage.retry_count ?? 0} |`, "");
     }
     if (l.evidence) {
       const e = l.evidence;
@@ -118,7 +120,8 @@ export async function renderRunReadme(paths: RunPaths, run: RunConfig, ledger: L
       lines.push(`| Checks | ${e.checks.map((c) => `${c.name}=${c.status}`).join(", ") || "none"} |`);
       lines.push(`| Verified / gaps | ${e.verified_records.length} / ${e.gap_records.length} |`);
       lines.push(`| Model | ${e.usage.model ?? "-"} |`);
-      lines.push(`| Tokens | ${fmtTokens(e.usage.totalTokens)} (${e.usage.turns} turns) |`, "");
+      lines.push(`| Tokens | ${fmtTokens(e.usage.totalTokens)} (${e.usage.turns} turns) |`);
+      lines.push(`| Duration / retries | ${formatDuration(e.usage.duration_ms)} / ${e.usage.retry_count ?? 0} |`, "");
       if (e.gap_records.length) {
         lines.push("#### Findings", "", "| ID | Severity | Claim |", "| --- | --- | --- |");
         for (const g of e.gap_records) lines.push(`| \`${g.claim_id}\` | ${g.severity ?? "-"} | ${cell(g.claim)} |`);
@@ -130,6 +133,10 @@ export async function renderRunReadme(paths: RunPaths, run: RunConfig, ledger: L
     }
   }
   return lines.join("\n");
+}
+
+function formatDuration(durationMs: number): string {
+  return `${(durationMs / 1000).toFixed(1)}s`;
 }
 
 export function renderTesterReport(e: EvidenceBundle): string {
