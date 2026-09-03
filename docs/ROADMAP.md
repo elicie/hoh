@@ -34,7 +34,7 @@
 
 ## 현재 판단
 
-현재 런타임은 세 역할의 분리 호출, 이전 후보 warm-start, QA용 동결 worktree, 실제 후보 diff, 구조화된 증거, 반복 gap 에스컬레이션, 점진적 역할 컨텍스트, 역할별 pi 자원, Git 이력, 재개와 논문 실행 계약 고정을 갖췄다. 명시한 Core 계약과 10번, 7번의 lifecycle·취소·재시도 기반은 완료됐다. 다음 작업은 7번의 명시적 예산 원장을 완성하는 것이다.
+현재 런타임은 세 역할의 분리 호출, 이전 후보 warm-start, QA용 동결 worktree, 실제 후보 diff, 구조화된 증거, 반복 gap 에스컬레이션, 점진적 역할 컨텍스트, 역할별 pi 자원·compaction 정책, Git 이력, 재개와 논문 실행 계약 고정을 갖췄다. 명시한 Core 계약과 7번, 10번, 11번, Codex 하네스 최소 경로가 완료됐다. 다음 구현 우선순위는 15번의 저장 전 마스킹, 통합 run receipt, 오프라인 무결성 검증이다.
 
 ## 우선순위 요약
 
@@ -50,7 +50,7 @@
 | 8 | 원장 에스컬레이션 / 후보 복구 | Core / Draft | 8A 완료 / 8B 필요 시 | 유지 | – | 1, 2 |
 | 9 | 점진적 컨텍스트 노출과 프롬프트 정리 | Core | 완료 | 유지 | – | 2, 6 |
 | 10 | 역할별 pi 확장·스킬 주입 | Full | 완료 | 유지 | – | 4 |
-| 11 | Developer 컨텍스트·토큰 절감 | Ops | 대기 | P2 | 0.5일 | 9 |
+| 11 | Developer 컨텍스트·토큰 절감 | Ops | 완료 | 유지 | – | 9 |
 | 12 | MCP 브리지 | Extension | 필요 시 | P3 | 1일 | 10 |
 | 13 | 샌드박스 실행 가이드 | Ops | 필요 시 | P3 | 1일 | 7 |
 | 14 | 추가 하네스 어댑터 | Experiment | Codex 완료 | 유지 | – | 4 |
@@ -196,18 +196,16 @@ pi의 ambient extensions와 skills는 계속 끈 채, 설정에 명시한 worksp
 - resource 필드가 없던 legacy `paper` receipt는 현재 manifest가 비어 있을 때만 호환한다. 과거에 무시되던 설정이 새 capability로 활성화되면 새 run을 요구한다.
 - tool allowlist는 모델 호출 권한 경계이지 확장 코드 sandbox가 아니다. 확장은 검토된 신뢰 코드로만 취급한다.
 
-## 11. Developer 컨텍스트·토큰 절감 — 부분 완료
+## 11. Developer 컨텍스트·토큰 절감 — 완료
 
-완료된 기반:
+완료된 범위:
 
 - Developer는 큰 파일을 통째로 읽기 전에 `grep`·`find`로 대상 경로와 symbol을 찾고 bounded partial read를 우선한다.
 - context exact view, index, candidate diff, 전체 role prompt의 UTF-8 byte 상한을 하나의 runtime policy로 공유한다. 기존 import 경로는 호환을 유지한다.
 - 경계값의 inclusive 동작과 Developer가 spec, 승인된 development document, 실제 mandatory blocker를 계속 받는지를 자동 테스트한다.
-
-남은 작업:
-
-- 역할별 compaction 설정과 사용량 기록 노출
-- 최적화 전후의 prompt 크기와 토큰 사용량을 fixture로 비교
+- `pi.compaction` 기본값과 `pi.roles.<role>.compaction` override를 런타임이 강제해 ambient pi 설정에 의존하지 않는다.
+- 성공한 compaction의 횟수, compaction 전 토큰 추정치 합계, 마지막 compaction 후 추정치를 역할 usage, 예산 원장, 실행 리포트, transcript에 남긴다. 요약 생성 LLM usage도 역할 사용량에 합산한다.
+- 대형 Developer fixture에서 최적화 전 입력 본문과 실제 bounded prompt의 UTF-8 byte 및 결정적 토큰 추정치를 비교하고, canonical spec·plan·blocker 경로가 남는지 함께 검증한다.
 
 비용 절감 때문에 Developer가 스펙, 승인 plan, 열린 blocker를 보지 못하게 해서는 안 된다.
 

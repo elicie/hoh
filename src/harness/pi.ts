@@ -57,6 +57,7 @@ export interface PiSessionPolicy {
   providerTimeoutMs: number;
   outputIdleTimeoutMs: number;
   websocketConnectTimeoutMs: number;
+  compaction: Record<Role, { enabled: boolean; reserveTokens: number; keepRecentTokens: number }>;
 }
 
 const MAX_STRING = 20_000;
@@ -172,6 +173,7 @@ export class PiHarness implements Harness {
         },
         httpIdleTimeoutMs: policy.outputIdleTimeoutMs,
         websocketConnectTimeoutMs: policy.websocketConnectTimeoutMs,
+        compaction: policy.compaction[inv.role],
       });
     }
 
@@ -197,6 +199,9 @@ export class PiHarness implements Harness {
     let lastError: string | undefined;
     let lastStop: string | undefined;
     let retryCount = 0;
+    let compactionCount = 0;
+    let compactionTokensBefore = 0;
+    let compactionEstimatedTokensAfter: number | undefined;
     inv.onTranscript?.(
       `${JSON.stringify({ ts: new Date().toISOString(), type: "hoh_invocation", role: inv.role, loop: inv.loopIndex, cwd: inv.cwd, tools: allowedTools, model: usedModel, transport_policy: this.opts.sessionPolicy })}\n`,
     );
@@ -205,6 +210,12 @@ export class PiHarness implements Harness {
       if (event.type === "message_update") return;
       inv.onTranscript?.(`${JSON.stringify({ ts: new Date().toISOString(), ...event }, truncate)}\n`);
       if (event.type === "auto_retry_start") retryCount += 1;
+      if (event.type === "compaction_end" && !event.aborted && event.result) {
+        compactionCount += 1;
+        compactionTokensBefore += finiteNumber(event.result.tokensBefore);
+        if (Number.isFinite(event.result.estimatedTokensAfter)) compactionEstimatedTokensAfter = event.result.estimatedTokensAfter;
+        addPiUsage(usage, event.result.usage);
+      }
       if (event.type === "turn_end") turns += 1;
       if (event.type === "message_end" && event.message?.role === "assistant") {
         const m = event.message;
@@ -239,8 +250,30 @@ export class PiHarness implements Harness {
     if (lastStop === "error") {
       throw new Error(`pi: model error during ${inv.role}: ${lastError ?? "unknown error"}`);
     }
-    return { finalText, submissions, usage, turns, model: usedModel, ...(retryCount > 0 ? { retryCount } : {}) };
+    return {
+      finalText,
+      submissions,
+      usage,
+      turns,
+      model: usedModel,
+      ...(retryCount > 0 ? { retryCount } : {}),
+      ...(compactionCount > 0 ? { compactionCount, compactionTokensBefore, compactionEstimatedTokensAfter } : {}),
+    };
   }
+}
+
+function addPiUsage(target: ReturnType<typeof emptyUsage>, value: any): void {
+  if (!value || typeof value !== "object") return;
+  target.input += finiteNumber(value.input);
+  target.output += finiteNumber(value.output);
+  target.cacheRead += finiteNumber(value.cacheRead);
+  target.cacheWrite += finiteNumber(value.cacheWrite);
+  target.totalTokens += finiteNumber(value.totalTokens);
+  target.cost += finiteNumber(value.cost?.total ?? value.cost);
+}
+
+function finiteNumber(value: unknown): number {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : 0;
 }
 
 function roleToolGuard(allowedTools: ReadonlySet<string>): InlineExtension {

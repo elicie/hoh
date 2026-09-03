@@ -766,6 +766,9 @@ async function invokeRole(ctx: Ctx, inv: RuntimeRoleInvocation, requiredTool?: s
   let completedHarnessResults = 0;
   const total: RoleUsage = { ...emptyUsage(), turns: 0, duration_ms: 0 };
   let retryCount = 0;
+  let compactionCount = 0;
+  let compactionTokensBefore = 0;
+  let compactionEstimatedTokensAfter: number | undefined;
   let attempts = 0;
   let result: RoleResult = { finalText: "", submissions: {}, usage: emptyUsage(), turns: 0 };
   let finalUserPrompt = inv.prompt;
@@ -793,6 +796,11 @@ async function invokeRole(ctx: Ctx, inv: RuntimeRoleInvocation, requiredTool?: s
       for (const k of ["input", "output", "cacheRead", "cacheWrite", "totalTokens", "cost"] as const) total[k] += result.usage[k] ?? 0;
       total.turns += result.turns;
       retryCount += result.retryCount ?? 0;
+      compactionCount += result.compactionCount ?? 0;
+      compactionTokensBefore += result.compactionTokensBefore ?? 0;
+      if (result.compactionEstimatedTokensAfter !== undefined) {
+        compactionEstimatedTokensAfter = result.compactionEstimatedTokensAfter;
+      }
       if (result.model) total.model = result.model;
       completedHarnessResults += 1;
       signal?.throwIfAborted();
@@ -809,6 +817,11 @@ async function invokeRole(ctx: Ctx, inv: RuntimeRoleInvocation, requiredTool?: s
     }
     total.duration_ms = Date.now() - started;
     if (retryCount > 0) total.retry_count = retryCount;
+    if (compactionCount > 0) {
+      total.compaction_count = compactionCount;
+      total.compaction_tokens_before = compactionTokensBefore;
+      if (compactionEstimatedTokensAfter !== undefined) total.compaction_estimated_tokens_after = compactionEstimatedTokensAfter;
+    }
     await ctx.budget.completeRole(budgetAttempt, total);
   } catch (error) {
     if (budgetAttempt) {
@@ -816,6 +829,11 @@ async function invokeRole(ctx: Ctx, inv: RuntimeRoleInvocation, requiredTool?: s
         if (completedHarnessResults > 0) {
           total.duration_ms = Math.max(0, Date.now() - started);
           if (retryCount > 0) total.retry_count = retryCount;
+          if (compactionCount > 0) {
+            total.compaction_count = compactionCount;
+            total.compaction_tokens_before = compactionTokensBefore;
+            if (compactionEstimatedTokensAfter !== undefined) total.compaction_estimated_tokens_after = compactionEstimatedTokensAfter;
+          }
         }
         await ctx.budget.failRole(budgetAttempt, completedHarnessResults > 0 ? total : undefined);
       } catch (budgetWriteError: any) {

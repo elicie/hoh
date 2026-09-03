@@ -103,6 +103,7 @@ export async function renderRunReadme(paths: RunPaths, run: RunConfig, ledger: L
       lines.push(`| Priorities | ${l.planner.priorities.map((p) => cell(p.name)).join("; ")} |`);
       lines.push(`| Model | ${l.planner.usage.model ?? "-"} |`);
       lines.push(`| Tokens | ${fmtTokens(l.planner.usage.totalTokens)} (${l.planner.usage.turns} turns) |`);
+      if (l.planner.usage.compaction_count) lines.push(compactionUsageRow(l.planner.usage));
       lines.push(`| Duration / retries | ${formatDuration(l.planner.usage.duration_ms)} / ${l.planner.usage.retry_count ?? 0} |`, "");
     }
     if (l.developer) {
@@ -112,6 +113,7 @@ export async function renderRunReadme(paths: RunPaths, run: RunConfig, ledger: L
       lines.push(`| Violations | ${l.developer.violations.length ? l.developer.violations.map(cell).join("; ") : "none"} |`);
       lines.push(`| Model | ${l.developer.usage.model ?? "-"} |`);
       lines.push(`| Tokens | ${fmtTokens(l.developer.usage.totalTokens)} (${l.developer.usage.turns} turns) |`);
+      if (l.developer.usage.compaction_count) lines.push(compactionUsageRow(l.developer.usage));
       lines.push(`| Duration / retries | ${formatDuration(l.developer.usage.duration_ms)} / ${l.developer.usage.retry_count ?? 0} |`, "");
     }
     if (l.evidence) {
@@ -123,6 +125,7 @@ export async function renderRunReadme(paths: RunPaths, run: RunConfig, ledger: L
       lines.push(`| Verified / gaps | ${e.verified_records.length} / ${e.gap_records.length} |`);
       lines.push(`| Model | ${e.usage.model ?? "-"} |`);
       lines.push(`| Tokens | ${fmtTokens(e.usage.totalTokens)} (${e.usage.turns} turns) |`);
+      if (e.usage.compaction_count) lines.push(compactionUsageRow(e.usage));
       lines.push(`| Duration / retries | ${formatDuration(e.usage.duration_ms)} / ${e.usage.retry_count ?? 0} |`, "");
       if (e.gap_records.length) {
         lines.push("#### Findings", "", "| ID | Severity | Claim |", "| --- | --- | --- |");
@@ -135,6 +138,12 @@ export async function renderRunReadme(paths: RunPaths, run: RunConfig, ledger: L
     }
   }
   return lines.join("\n");
+}
+
+function compactionUsageRow(usage: import("../types.js").RoleUsage): string {
+  const before = fmtTokens(usage.compaction_tokens_before ?? 0);
+  const after = usage.compaction_estimated_tokens_after === undefined ? "unknown" : fmtTokens(usage.compaction_estimated_tokens_after);
+  return `| Compactions | ${usage.compaction_count ?? 0} (${before} before → ${after} estimated after) |`;
 }
 
 function renderBudgetSummary(lines: string[], budget: BudgetLedger): void {

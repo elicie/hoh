@@ -264,7 +264,20 @@ test("large role contexts retain canonical paths without leaking omitted bodies"
   assert.doesNotMatch(developer.user, new RegExp(sentinel));
   assert.match(developer.user, /`\.hoh\/iterations\/loop-02\/development_document\.md`/);
   assert.match(developer.user, /`\.hoh\/iterations\/loop-01\/developer\.json`/);
-  assert.ok(Buffer.byteLength(developer.system, "utf8") + Buffer.byteLength(developer.user, "utf8") <= MAX_ROLE_PROMPT_BYTES);
+  const optimizedDeveloperBytes = Buffer.byteLength(developer.system, "utf8") + Buffer.byteLength(developer.user, "utf8");
+  assert.ok(optimizedDeveloperBytes <= MAX_ROLE_PROMPT_BYTES);
+  const unboundedDeveloperBytes = Buffer.byteLength(
+    [largeSpec, largeDevelopmentDocument, ...largeChangedPaths].join("\n"),
+    "utf8",
+  );
+  const footprint = {
+    before_bytes: unboundedDeveloperBytes,
+    after_bytes: optimizedDeveloperBytes,
+    before_estimated_tokens: Math.ceil(unboundedDeveloperBytes / 4),
+    after_estimated_tokens: Math.ceil(optimizedDeveloperBytes / 4),
+  };
+  assert.ok(footprint.after_bytes < footprint.before_bytes / 4, JSON.stringify(footprint));
+  assert.ok(footprint.after_estimated_tokens < footprint.before_estimated_tokens / 4, JSON.stringify(footprint));
 
   const largeChecks: CheckResult[] = [
     { name: "build", command: "npm run build", status: "fail", exit_code: 1, duration_ms: 25, stdout_tail: largeBody, stderr_tail: largeBody },

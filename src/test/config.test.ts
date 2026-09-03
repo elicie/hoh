@@ -3,7 +3,7 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { test } from "node:test";
 import { createDemoMockHarness } from "../harness/mock.js";
-import { DEFAULT_CONFIG, mergeConfig, modelForRole, pickConfigFile, readConfigFile, validateConfig } from "../runtime/config.js";
+import { DEFAULT_CONFIG, mergeConfig, modelForRole, piCompactionForRole, pickConfigFile, readConfigFile, validateConfig } from "../runtime/config.js";
 import { buildPiModelsJson, discoverModels, expandEnv, materializePiModels, toPiModel } from "../runtime/providers.js";
 import { startFakeOpenAI } from "./fake-openai.js";
 import { runHoh } from "../runtime/loop.js";
@@ -21,6 +21,7 @@ test("config: merge, per-role model fallback, validation", async () => {
   assert.equal(c.protocol, "extended", "missing protocol preserves legacy behavior");
   assert.equal(c.retry.max_retries, 3);
   assert.equal(c.timeouts.output_idle_ms, 300_000);
+  assert.deepEqual(piCompactionForRole(c, "planner"), { enabled: true, reserve_tokens: 16_384, keep_recent_tokens: 20_000 });
   assert.deepEqual(validateConfig(c), []);
 
   const paper = mergeConfig(DEFAULT_CONFIG, { protocol: "paper", harness: "mock", models: { default: "a/x" } });
@@ -72,6 +73,29 @@ test("config: merge, per-role model fallback, validation", async () => {
 
   // mock harness needs no model
   assert.deepEqual(validateConfig(mergeConfig(DEFAULT_CONFIG, { harness: "mock" })), []);
+
+  const compacted = mergeConfig(DEFAULT_CONFIG, {
+    harness: "mock",
+    pi: {
+      compaction: { enabled: true, reserve_tokens: 24_000, keep_recent_tokens: 12_000 },
+      roles: { developer: { compaction: { enabled: false } } },
+    },
+  });
+  assert.deepEqual(piCompactionForRole(compacted, "planner"), {
+    enabled: true,
+    reserve_tokens: 24_000,
+    keep_recent_tokens: 12_000,
+  });
+  assert.deepEqual(piCompactionForRole(compacted, "developer"), {
+    enabled: false,
+    reserve_tokens: 24_000,
+    keep_recent_tokens: 12_000,
+  });
+  assert.ok(
+    validateConfig(
+      mergeConfig(DEFAULT_CONFIG, { harness: "mock", pi: { roles: { tester: { compaction: { reserve_tokens: 0 } } } } }),
+    ).some((error) => /pi\.roles\.tester\.compaction\.reserve_tokens/.test(error)),
+  );
 });
 
 test("config: file resolution order and unknown keys", async () => {

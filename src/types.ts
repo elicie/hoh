@@ -236,6 +236,12 @@ export interface RoleUsage extends UsageTotals {
   duration_ms: number;
   /** Same-session transient transport retries; detailed lifecycle events are in the role transcript. */
   retry_count?: number;
+  /** Successful automatic context compactions inside this fresh role session. */
+  compaction_count?: number;
+  /** Sum of adapter-reported context tokens before those compactions. */
+  compaction_tokens_before?: number;
+  /** Last adapter-reported context estimate after compaction. */
+  compaction_estimated_tokens_after?: number;
   /** model actually used by the harness for this role, e.g. "anthropic/claude-opus-5:high" */
   model?: string;
 }

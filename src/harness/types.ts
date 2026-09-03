@@ -53,6 +53,12 @@ export interface RoleResult {
   turns: number;
   /** Same-session transient retries reported by the adapter. Detailed events remain in the transcript. */
   retryCount?: number;
+  /** Successful automatic context compactions performed inside this role session. */
+  compactionCount?: number;
+  /** Sum of context-token estimates immediately before successful compactions. */
+  compactionTokensBefore?: number;
+  /** Most recent post-compaction context-token estimate, when reported. */
+  compactionEstimatedTokensAfter?: number;
 }
 
 export interface HarnessRolePolicy {

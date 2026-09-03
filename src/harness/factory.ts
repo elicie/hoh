@@ -4,11 +4,11 @@
  */
 import path from "node:path";
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
-import type { HohConfig } from "../runtime/config.js";
+import { piCompactionForRole, type HohConfig } from "../runtime/config.js";
 import { assertPiResourceManifestCurrent, buildPiResourceManifest } from "../runtime/pi-resources.js";
 import { materializePiModels, type PiModelsJson } from "../runtime/providers.js";
 import { RunPaths } from "../runtime/state.js";
-import type { Role } from "../types.js";
+import { ROLES, type Role } from "../types.js";
 import { CodexHarness, detectCodexVersion, type CodexHarnessOptions } from "./codex.js";
 import { createDemoMockHarness } from "./mock.js";
 import { PiHarness } from "./pi.js";
@@ -67,6 +67,12 @@ export async function createHarness(config: HohConfig, workspace: string, opts: 
       providerTimeoutMs: config.timeouts.provider_ms,
       outputIdleTimeoutMs: config.timeouts.output_idle_ms,
       websocketConnectTimeoutMs: config.timeouts.websocket_connect_ms,
+      compaction: Object.fromEntries(
+        ROLES.map((role) => {
+          const value = piCompactionForRole(config, role);
+          return [role, { enabled: value.enabled, reserveTokens: value.reserve_tokens, keepRecentTokens: value.keep_recent_tokens }];
+        }),
+      ) as Record<Role, { enabled: boolean; reserveTokens: number; keepRecentTokens: number }>,
     },
   });
 }

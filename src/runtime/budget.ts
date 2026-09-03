@@ -399,6 +399,11 @@ function validateRoleUsage(usage: RoleUsage): RoleUsage {
   for (const key of numericKeys) {
     if (!Number.isFinite(usage[key]) || usage[key] < 0) throw new Error(`cannot charge invalid role usage ${key}=${JSON.stringify(usage[key])}`);
   }
+  for (const key of ["retry_count", "compaction_count", "compaction_tokens_before", "compaction_estimated_tokens_after"] as const) {
+    if (usage[key] !== undefined && (!Number.isFinite(usage[key]) || usage[key]! < 0)) {
+      throw new Error(`cannot charge invalid role usage ${key}=${JSON.stringify(usage[key])}`);
+    }
+  }
   return structuredClone(usage);
 }
 

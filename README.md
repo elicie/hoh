@@ -141,6 +141,10 @@ of pretending that Codex exposes pi's individual built-in tool names.
   and after loading, and included in new protocol receipts. Extensions are
   trusted executable code, not a sandbox: use reviewed local code and scoped
   credentials even when its LLM-callable tools are restricted.
+- **Role-owned pi compaction.** HoH overrides ambient pi compaction settings with
+  a fixed global policy and optional per-role overrides. Successful compactions
+  expose before/after context estimates in role usage and the run report, while
+  the summarization call's reported tokens and cost are charged to that role.
 - **Cooperative cancellation.** Library callers may pass `signal` to `runHoh`.
   It propagates through claim drafting, every role invocation, setup, and
   deterministic checks. Pi aborts the active session, check process groups are
@@ -226,7 +230,10 @@ lists can be discovered from `GET {base_url}/models`. The root config uses
     "loop": { "elapsed_ms": 10800000, "total_tokens": 250000, "cost": 12.5 },
     "run": { "elapsed_ms": 32400000, "total_tokens": 750000, "cost": 35.0 }
   },
-  "pi": {}
+  "pi": {
+    "compaction": { "enabled": true, "reserve_tokens": 16384, "keep_recent_tokens": 20000 },
+    "roles": { "developer": { "compaction": { "keep_recent_tokens": 12000 } } }
+  }
 }
 ```
 
@@ -253,9 +260,11 @@ lists can be discovered from `GET {base_url}/models`. The root config uses
 | `retry.*` | same-session transient retry policy: enablement, retry count, exponential-backoff base and maximum accepted server delay |
 | `budgets.role` / `loop` / `run` | optional ceilings with `elapsed_ms` (positive integer), `total_tokens` (positive integer), and fractional `cost` (positive finite number). Omit any scope or metric to leave it unlimited. Codex CLI does not report monetary cost, so Codex configs may use elapsed/token limits but not `cost` |
 | `pi.agent_dir` | pi's credential/models directory (default `~/.pi/agent`) |
+| `pi.compaction` | runtime-owned default for every role: `enabled`, positive `reserve_tokens`, and positive `keep_recent_tokens`; defaults to `true`, `16384`, and `20000` |
 | `pi.extensions` / `pi.skills` | reviewed workspace-relative resource paths loaded for every role; ambient pi discovery remains disabled |
 | `pi.roles.<role>.extensions` / `skills` | additional resources loaded only for `planner`, `developer`, or `tester` |
 | `pi.roles.<role>.extension_tools` | exact extension-registered tool names exposed to that role; built-in and `submit_*` names are reserved |
+| `pi.roles.<role>.compaction` | partial override of the global compaction policy for `planner`, `developer`, or `tester` |
 
 A minimal Codex run uses the installed `codex` executable and its own existing
 authentication. The adapter fixes the CLI version, ignores ambient Codex config
@@ -405,7 +414,8 @@ npm test
 - `coverage.test.ts`: fixed-claim initialization, cross-loop status transitions,
   required evidence types, prompt/report/status rendering, and `init-claims`.
 - `prompts.test.ts`: UTF-8 disclosure budgets, priority indexes, role-specific
-  context projection, canonical paths, and oversized-body omission.
+  context projection, canonical paths, oversized-body omission, and the bounded
+  Developer prompt's byte/token-estimate reduction against an unbounded fixture.
 - `prompt-snapshot.test.ts`: exact final prompt hashes, retry capture, resume
   behavior, candidate exclusion, and external-evaluator metadata non-mixing.
 - `evidence-files.test.ts`: durable Tester files, check output, SHA-256 binding,

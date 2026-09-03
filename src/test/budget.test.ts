@@ -32,7 +32,13 @@ function usage(totalTokens: number, cost: number): UsageTotals {
 
 function meteredHarness(
   byRole: Partial<Record<Role, UsageTotals>>,
-  options: { delayMs?: number; retryCount?: number; failRole?: Role; onInvoke?: (inv: RoleInvocation) => Promise<void> } = {},
+  options: {
+    delayMs?: number;
+    retryCount?: number;
+    failRole?: Role;
+    onInvoke?: (inv: RoleInvocation) => Promise<void>;
+    compaction?: { role: Role; count: number; tokensBefore: number; estimatedTokensAfter: number };
+  } = {},
 ): MeteredHarness {
   const demo = createDemoMockHarness();
   const calls: Array<{ role: Role; loopIndex: number }> = [];
@@ -51,6 +57,13 @@ function meteredHarness(
         ...result,
         usage: byRole[inv.role] ?? usage(0, 0),
         retryCount: options.retryCount,
+        ...(options.compaction?.role === inv.role
+          ? {
+              compactionCount: options.compaction.count,
+              compactionTokensBefore: options.compaction.tokensBefore,
+              compactionEstimatedTokensAfter: options.compaction.estimatedTokensAfter,
+            }
+          : {}),
       };
     },
   };
@@ -270,6 +283,25 @@ test("paper resume cannot raise a stored resource ceiling or rewrite its records
     assert.equal(await readFile(paths.config, "utf8"), before.config);
     assert.equal(await readFile(paths.runJson, "utf8"), before.run);
     assert.equal(await readFile(paths.budget, "utf8"), before.budget);
+  } finally {
+    await cleanup();
+  }
+});
+
+test("role compaction metrics propagate into charged usage and the run report", async () => {
+  const { ws, spec, cleanup } = await makeWorkspace();
+  try {
+    const harness = meteredHarness(
+      { planner: usage(2, 0), developer: usage(9, 0), tester: usage(2, 0) },
+      { compaction: { role: "developer", count: 2, tokensBefore: 48_000, estimatedTokensAfter: 11_000 } },
+    );
+    const result = await runHoh({ workspace: ws, specPath: spec, harness, config: { harness: "mock", loops: 1 } });
+    const recorded = result.results[0].developer.usage;
+    assert.equal(recorded.compaction_count, 2);
+    assert.equal(recorded.compaction_tokens_before, 48_000);
+    assert.equal(recorded.compaction_estimated_tokens_after, 11_000);
+    assert.equal(result.budget.attempts.find((attempt) => attempt.role === "developer")?.usage?.compaction_count, 2);
+    assert.match(await readFile(new RunPaths(ws).readme, "utf8"), /Compactions \| 2 \(48\.0k before → 11\.0k estimated after\)/);
   } finally {
     await cleanup();
   }

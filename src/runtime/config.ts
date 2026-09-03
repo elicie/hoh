@@ -61,6 +61,18 @@ export interface ModelsConfig {
   tester?: string;
 }
 
+export interface PiCompactionConfig {
+  enabled: boolean;
+  reserve_tokens: number;
+  keep_recent_tokens: number;
+}
+
+export const DEFAULT_PI_COMPACTION: Readonly<PiCompactionConfig> = Object.freeze({
+  enabled: true,
+  reserve_tokens: 16_384,
+  keep_recent_tokens: 20_000,
+});
+
 export interface PiRoleResourcesConfig {
   /** Explicit workspace-relative extension files/directories added for this role. */
   extensions?: string[];
@@ -68,6 +80,8 @@ export interface PiRoleResourcesConfig {
   skills?: string[];
   /** Exact extension-registered tool names this role may invoke. */
   extension_tools?: string[];
+  /** Role-specific override of the deterministic pi compaction policy. */
+  compaction?: Partial<PiCompactionConfig>;
 }
 
 export interface PiConfig {
@@ -77,6 +91,8 @@ export interface PiConfig {
   extensions?: string[];
   /** Explicit workspace-relative skill files/directories shared by all roles. */
   skills?: string[];
+  /** Default compaction policy for all roles; role overrides merge on top. */
+  compaction?: PiCompactionConfig;
   /** Role additions are merged with the shared paths when the manifest is built. */
   roles?: Partial<Record<Role, PiRoleResourcesConfig>>;
 }
@@ -165,7 +181,7 @@ export const DEFAULT_CONFIG: HohConfig = {
   },
   retry: { enabled: true, max_retries: 3, base_delay_ms: 2_000, max_delay_ms: 60_000 },
   budgets: undefined,
-  pi: {},
+  pi: { compaction: { ...DEFAULT_PI_COMPACTION } },
 };
 
 export type ConfigPatch = {
@@ -229,6 +245,12 @@ function mergePiConfig(base: PiConfig, patch: Partial<PiConfig> | null | undefin
   if (!patch) return structuredClone(base);
   const definedPatch = Object.fromEntries(Object.entries(patch).filter(([, value]) => value !== undefined)) as Partial<PiConfig>;
   const merged = { ...structuredClone(base), ...definedPatch };
+  if (Object.prototype.hasOwnProperty.call(patch, "compaction")) {
+    merged.compaction =
+      patch.compaction && typeof patch.compaction === "object" && !Array.isArray(patch.compaction)
+        ? { ...(base.compaction ?? DEFAULT_PI_COMPACTION), ...stripUndefined(patch.compaction) }
+        : (patch.compaction as PiConfig["compaction"]);
+  }
   if (Object.prototype.hasOwnProperty.call(patch, "roles")) {
     if (!patch.roles || typeof patch.roles !== "object" || Array.isArray(patch.roles)) {
       merged.roles = patch.roles as PiConfig["roles"];
@@ -236,10 +258,18 @@ function mergePiConfig(base: PiConfig, patch: Partial<PiConfig> | null | undefin
       const roles: Partial<Record<Role, PiRoleResourcesConfig>> = structuredClone(base.roles ?? {});
       for (const [role, rolePatch] of Object.entries(patch.roles)) {
         const current = roles[role as Role] ?? {};
-        roles[role as Role] =
-          rolePatch && typeof rolePatch === "object" && !Array.isArray(rolePatch)
-            ? { ...current, ...Object.fromEntries(Object.entries(rolePatch).filter(([, value]) => value !== undefined)) }
-            : (rolePatch as PiRoleResourcesConfig);
+        if (rolePatch && typeof rolePatch === "object" && !Array.isArray(rolePatch)) {
+          const next = { ...current, ...Object.fromEntries(Object.entries(rolePatch).filter(([, value]) => value !== undefined)) };
+          if (Object.prototype.hasOwnProperty.call(rolePatch, "compaction")) {
+            next.compaction =
+              rolePatch.compaction && typeof rolePatch.compaction === "object" && !Array.isArray(rolePatch.compaction)
+                ? { ...(current.compaction ?? {}), ...stripUndefined(rolePatch.compaction) }
+                : rolePatch.compaction;
+          }
+          roles[role as Role] = next;
+        } else {
+          roles[role as Role] = rolePatch as PiRoleResourcesConfig;
+        }
       }
       merged.roles = roles;
     }
@@ -389,8 +419,8 @@ function validateBudgetConfig(budgets: BudgetConfig | undefined, errors: string[
 }
 
 const RESERVED_EXTENSION_TOOLS = new Set<string>(PI_BUILTIN_TOOL_NAMES);
-const PI_KEYS = new Set(["agent_dir", "extensions", "skills", "roles"]);
-const PI_ROLE_KEYS = new Set(["extensions", "skills", "extension_tools"]);
+const PI_KEYS = new Set(["agent_dir", "extensions", "skills", "compaction", "roles"]);
+const PI_ROLE_KEYS = new Set(["extensions", "skills", "extension_tools", "compaction"]);
 
 function validatePiConfig(pi: PiConfig, errors: string[]): void {
   if (!pi || typeof pi !== "object" || Array.isArray(pi)) {
@@ -405,6 +435,7 @@ function validatePiConfig(pi: PiConfig, errors: string[]): void {
   }
   validateResourcePathList(pi.extensions, "pi.extensions", errors);
   validateResourcePathList(pi.skills, "pi.skills", errors);
+  validatePiCompaction(pi.compaction, "pi.compaction", errors, false);
   if (pi.roles === undefined) return;
   if (!pi.roles || typeof pi.roles !== "object" || Array.isArray(pi.roles)) {
     errors.push("pi.roles must be an object keyed by planner, developer, or tester");
@@ -426,6 +457,27 @@ function validatePiConfig(pi: PiConfig, errors: string[]): void {
     validateResourcePathList(value.extensions, `${at}.extensions`, errors);
     validateResourcePathList(value.skills, `${at}.skills`, errors);
     validateExtensionToolList(value.extension_tools, `${at}.extension_tools`, errors);
+    validatePiCompaction(value.compaction, `${at}.compaction`, errors, true);
+  }
+}
+
+function validatePiCompaction(value: unknown, at: string, errors: string[], partial: boolean): void {
+  if (value === undefined) return;
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    errors.push(`${at} must be an object`);
+    return;
+  }
+  const record = value as Record<string, unknown>;
+  const keys = new Set(["enabled", "reserve_tokens", "keep_recent_tokens"]);
+  for (const key of Object.keys(record)) if (!keys.has(key)) errors.push(`${at}.${key} is not supported`);
+  if (!partial) {
+    for (const key of keys) if (!Object.prototype.hasOwnProperty.call(record, key)) errors.push(`${at}.${key} is required`);
+  }
+  if (record.enabled !== undefined && typeof record.enabled !== "boolean") errors.push(`${at}.enabled must be a boolean`);
+  for (const key of ["reserve_tokens", "keep_recent_tokens"] as const) {
+    if (record[key] !== undefined && (!Number.isSafeInteger(record[key]) || (record[key] as number) <= 0)) {
+      errors.push(`${at}.${key} must be a positive safe integer`);
+    }
   }
 }
 
@@ -499,6 +551,11 @@ export function assertValidConfig(c: HohConfig, source: string): void {
 
 export function modelForRole(c: HohConfig, role: Role): string | undefined {
   return c.models[role] ?? c.models.default;
+}
+
+export function piCompactionForRole(c: HohConfig, role: Role): PiCompactionConfig {
+  const base = c.pi.compaction ?? DEFAULT_PI_COMPACTION;
+  return { ...base, ...(c.pi.roles?.[role]?.compaction ?? {}) };
 }
 
 export async function readConfigFile(file: string): Promise<ConfigPatch> {
