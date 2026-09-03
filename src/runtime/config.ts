@@ -92,6 +92,24 @@ export interface RetryConfig {
   max_delay_ms: number;
 }
 
+export interface BudgetLimitConfig {
+  /** Active runtime wall time at this boundary. */
+  elapsed_ms?: number;
+  /** Completed role usage only. */
+  total_tokens?: number;
+  /** Completed role usage cost; fractional values are supported. */
+  cost?: number;
+}
+
+export interface BudgetConfig {
+  /** Maximum usage for each role slot in a loop, including successful structured-output attempts. */
+  role?: BudgetLimitConfig;
+  /** Maximum aggregate usage for one Planner -> Developer -> Tester loop. */
+  loop?: BudgetLimitConfig;
+  /** Maximum aggregate usage for the whole run. */
+  run?: BudgetLimitConfig;
+}
+
 export interface HohConfig {
   /** paper = fixed harness-model/runtime contract; extended = product-specific overrides */
   protocol: ExecutionProtocol;
@@ -123,6 +141,8 @@ export interface HohConfig {
     websocket_connect_ms: number;
   };
   retry: RetryConfig;
+  /** Optional role/loop/run usage ceilings. Omitted limits preserve the unbounded legacy behavior. */
+  budgets?: BudgetConfig;
   pi: PiConfig;
 }
 
@@ -144,6 +164,7 @@ export const DEFAULT_CONFIG: HohConfig = {
     websocket_connect_ms: 15_000,
   },
   retry: { enabled: true, max_retries: 3, base_delay_ms: 2_000, max_delay_ms: 60_000 },
+  budgets: undefined,
   pi: {},
 };
 
@@ -168,6 +189,7 @@ export function mergeConfig(base: HohConfig, patch: ConfigPatch | null | undefin
     checks: patch.checks ? patch.checks.map((c) => ({ ...c })) : base.checks.map((c) => ({ ...c })),
     timeouts: { ...base.timeouts, ...stripUndefined(patch.timeouts ?? {}) },
     retry: { ...base.retry, ...stripUndefined(patch.retry ?? {}) },
+    budgets: mergeBudgetConfig(base.budgets, patch.budgets),
     pi: mergePiConfig(base.pi, patch.pi),
   };
   if (merged.pi?.agent_dir) merged.pi.agent_dir = expandHome(merged.pi.agent_dir);
@@ -180,6 +202,26 @@ export function expandHome(p: string): string {
 
 function stripUndefined<T extends object>(o: T): T {
   return Object.fromEntries(Object.entries(o).filter(([, v]) => v !== undefined && v !== null)) as T;
+}
+
+function mergeBudgetConfig(base: BudgetConfig | undefined, patch: Partial<BudgetConfig> | null | undefined): BudgetConfig | undefined {
+  if (patch === null) return patch as unknown as BudgetConfig;
+  if (patch === undefined) return base ? structuredClone(base) : undefined;
+  if (typeof patch !== "object" || Array.isArray(patch)) return patch as BudgetConfig;
+  const merged: BudgetConfig = {};
+  for (const scope of ["role", "loop", "run"] as const) {
+    const patchHasScope = Object.prototype.hasOwnProperty.call(patch, scope);
+    const patchLimit = patch[scope];
+    if (!patchHasScope) {
+      if (base?.[scope]) merged[scope] = structuredClone(base[scope]);
+    } else if (patchLimit === null || typeof patchLimit !== "object" || Array.isArray(patchLimit)) {
+      merged[scope] = patchLimit as BudgetLimitConfig;
+    } else {
+      const definedLimit = Object.fromEntries(Object.entries(patchLimit).filter(([, value]) => value !== undefined));
+      merged[scope] = { ...(base?.[scope] ?? {}), ...definedLimit };
+    }
+  }
+  return merged;
 }
 
 function mergePiConfig(base: PiConfig, patch: Partial<PiConfig> | null | undefined): PiConfig {
@@ -297,8 +339,44 @@ export function validateConfig(c: HohConfig): string[] {
     if (!Number.isFinite(c.retry.base_delay_ms) || c.retry.base_delay_ms < 0) errors.push("retry.base_delay_ms must be >= 0");
     if (!Number.isFinite(c.retry.max_delay_ms) || c.retry.max_delay_ms < 0) errors.push("retry.max_delay_ms must be >= 0");
   }
+  validateBudgetConfig(c.budgets, errors);
   validatePiConfig(c.pi, errors);
   return errors;
+}
+
+const BUDGET_SCOPES = new Set(["role", "loop", "run"]);
+const BUDGET_METRICS = new Set(["elapsed_ms", "total_tokens", "cost"]);
+
+function validateBudgetConfig(budgets: BudgetConfig | undefined, errors: string[]): void {
+  if (budgets === undefined) return;
+  if (!budgets || typeof budgets !== "object" || Array.isArray(budgets)) {
+    errors.push("budgets must be an object");
+    return;
+  }
+  for (const scope of Object.keys(budgets)) {
+    if (!BUDGET_SCOPES.has(scope)) errors.push(`budgets.${scope} is not supported (use role, loop, or run)`);
+  }
+  for (const scope of ["role", "loop", "run"] as const) {
+    const limit = budgets[scope];
+    if (limit === undefined) continue;
+    const at = `budgets.${scope}`;
+    if (!limit || typeof limit !== "object" || Array.isArray(limit)) {
+      errors.push(`${at} must be an object`);
+      continue;
+    }
+    for (const metric of Object.keys(limit)) {
+      if (!BUDGET_METRICS.has(metric)) errors.push(`${at}.${metric} is not supported (use elapsed_ms, total_tokens, or cost)`);
+    }
+    if (limit.elapsed_ms !== undefined && (!Number.isInteger(limit.elapsed_ms) || limit.elapsed_ms <= 0)) {
+      errors.push(`${at}.elapsed_ms must be a positive integer`);
+    }
+    if (limit.total_tokens !== undefined && (!Number.isInteger(limit.total_tokens) || limit.total_tokens <= 0)) {
+      errors.push(`${at}.total_tokens must be a positive integer`);
+    }
+    if (limit.cost !== undefined && (!Number.isFinite(limit.cost) || limit.cost <= 0)) {
+      errors.push(`${at}.cost must be a positive finite number`);
+    }
+  }
 }
 
 const RESERVED_EXTENSION_TOOLS = new Set<string>(PI_BUILTIN_TOOL_NAMES);

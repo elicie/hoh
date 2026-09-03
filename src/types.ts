@@ -240,6 +240,77 @@ export interface RoleUsage extends UsageTotals {
   model?: string;
 }
 
+export interface BudgetTotals {
+  elapsed_ms: number;
+  total_tokens: number;
+  cost: number;
+}
+
+export type BudgetMetric = keyof BudgetTotals;
+export type BudgetScope = "role" | "loop" | "run";
+export type BudgetLedgerStatus = "running" | "completed" | "budget_exhausted";
+
+export interface BudgetRoleAttempt {
+  id: string;
+  loop_index: number;
+  role: Role;
+  outcome: "running" | "completed" | "failed";
+  /** Null means no completed harness result returned usage; the runtime never substitutes a guessed zero. */
+  usage: RoleUsage | null;
+  started_at: string;
+  finished_at?: string;
+  source: "runtime" | "reconstructed_record";
+}
+
+export interface BudgetRoleTotals extends BudgetTotals {
+  attempts: number;
+}
+
+export interface BudgetLoopLedger {
+  loop_index: number;
+  totals: BudgetTotals;
+  roles: Partial<Record<Role, BudgetRoleTotals>>;
+}
+
+export interface BudgetExhaustion {
+  scope: BudgetScope;
+  metric: BudgetMetric;
+  used: number;
+  limit: number;
+  loop_index?: number;
+  role?: Role;
+  /** The role that was refused at this persisted budget boundary. */
+  before_role?: Role;
+  detected_at: string;
+}
+
+export interface BudgetCurrentRole {
+  attempt_id: string;
+  loop_index: number;
+  role: Role;
+  started_at: string;
+  /** Charged usage for earlier attempts of this role slot when the current attempt began. */
+  charged_before_start: BudgetRoleTotals;
+}
+
+/** Canonical, atomically-written run/loop/role budget accounting record. */
+export interface BudgetLedger {
+  schema_version: 1;
+  status: BudgetLedgerStatus;
+  limits: import("./runtime/config.js").BudgetConfig;
+  totals: BudgetTotals;
+  loops: Record<string, BudgetLoopLedger>;
+  attempts: BudgetRoleAttempt[];
+  current_role: BudgetCurrentRole | null;
+  exhaustion: BudgetExhaustion | null;
+  accounting: {
+    completed_role_usage: "charged_from_role_usage";
+    failed_invocation_usage: "unavailable_not_estimated";
+  };
+  created_at: string;
+  updated_at: string;
+}
+
 /** Exact final role input delivered to the harness for one loop. */
 export interface RolePromptSnapshot {
   schema_version: 1;

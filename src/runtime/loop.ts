@@ -18,6 +18,7 @@ import { randomBytes } from "node:crypto";
 import type { Harness, RoleInvocation, RoleResult } from "../harness/types.js";
 import { CODING_TOOLS, INSPECT_TOOLS, READ_ONLY_TOOLS, emptyUsage } from "../harness/types.js";
 import type {
+  BudgetLedger,
   CheckResult,
   ClaimCatalog,
   ClaimRecord,
@@ -33,6 +34,7 @@ import type {
   RunConfig,
 } from "../types.js";
 import { EXECUTION_EVIDENCE_TYPES } from "../types.js";
+import { BudgetExhaustedError, BudgetTracker, formatBudgetExhaustion } from "./budget.js";
 import { runCheck, runChecks } from "./checks.js";
 import { buildCandidateDiff } from "./candidate-diff.js";
 import { ensureClaimState } from "./claims.js";
@@ -98,6 +100,8 @@ export interface RunResult {
   run: RunConfig;
   results: LoopResult[];
   ledger: Ledger;
+  status: "completed" | "budget_exhausted";
+  budget: BudgetLedger;
 }
 
 const FAILED_TRANSCRIPT_CAPTURE = Symbol("hoh.failedTranscriptCapture");
@@ -111,6 +115,7 @@ interface Ctx {
   log: Logger;
   claimCatalog: ClaimCatalog;
   coverage: CoverageState;
+  budget: BudgetTracker;
   signal?: AbortSignal;
 }
 
@@ -217,6 +222,9 @@ export async function runHoh(opts: RunOptions): Promise<RunResult> {
     timeoutMs: config.timeouts.role_min * 60_000,
     signal: opts.signal,
   });
+  // The optional loop-0 claim-drafting extension predates RoleUsage accounting.
+  // The canonical budget boundary deliberately starts at Planner loop 1.
+  const budget = await BudgetTracker.open(paths, config.budgets);
   await writeText(paths.readme, await renderRunReadme(paths, run, await loadLedger(paths)));
   if (initialized) {
     await commitAll(ws, `chore(hoh): initialize run ${run.run_id}`, RUNTIME_IDENTITY, ["."]);
@@ -246,15 +254,35 @@ export async function runHoh(opts: RunOptions): Promise<RunResult> {
     log,
     claimCatalog: claimState.catalog,
     coverage: claimState.coverage,
+    budget,
     signal: opts.signal,
   };
   const done = await lastCompletedLoop(paths);
   const results: LoopResult[] = [];
-  for (let t = done + 1; t <= config.loops; t++) {
-    results.push(await runLoop(ctx, t));
+  try {
+    for (let t = done + 1; t <= config.loops; t++) {
+      results.push(await runLoop(ctx, t));
+      await budget.endLoop(t);
+    }
+  } catch (error) {
+    if (!(error instanceof BudgetExhaustedError)) throw error;
+    const budgetLedger = await budget.finish(false);
+    await writeText(paths.readme, await renderRunReadme(paths, run, await loadLedger(paths)));
+    await commitAll(ws, `chore(hoh): ${error.message}`, RUNTIME_IDENTITY, [".hoh"]);
+    log(`BUDGET_EXHAUSTED ${formatBudgetExhaustion(error.exhaustion)}`);
+    return { run, results, ledger: await loadLedger(paths), status: "budget_exhausted", budget: budgetLedger };
   }
   if (done >= config.loops) log(`all ${config.loops} loops already completed; nothing to do`);
-  return { run, results, ledger: await loadLedger(paths) };
+  const budgetLedger = await budget.finish(true);
+  await writeText(paths.readme, await renderRunReadme(paths, run, await loadLedger(paths)));
+  await commitAll(ws, "chore(hoh): finalize run accounting", RUNTIME_IDENTITY, [paths.rel(paths.budget), paths.rel(paths.readme)]);
+  return {
+    run,
+    results,
+    ledger: await loadLedger(paths),
+    status: budgetLedger.status === "budget_exhausted" ? "budget_exhausted" : "completed",
+    budget: budgetLedger,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -268,6 +296,7 @@ export async function runLoop(ctx: Ctx, t: number): Promise<LoopResult> {
   await mkdir(path.join(loopDir, "transcripts"), { recursive: true });
 
   try {
+    await ctx.budget.startLoop(t);
     const spec = await readFile(paths.spec, "utf8");
     const artifactDir = config.artifact_dir;
     const artifactAbs = path.resolve(ws, artifactDir);
@@ -411,7 +440,10 @@ export async function runLoop(ctx: Ctx, t: number): Promise<LoopResult> {
     });
     const violations: string[] = [];
     // Runtime records are off limits to the Developer; the runtime's own transcript for this loop is not a violation.
-    const hohChanges = (await pathsChanged(ws, recordSpec)).filter((p) => !dirtyBefore.has(p));
+    const budgetRel = paths.rel(paths.budget).replaceAll(path.sep, "/");
+    const hohChanges = (await pathsChanged(ws, recordSpec)).filter(
+      (p) => !dirtyBefore.has(p) && p.replaceAll(path.sep, "/") !== budgetRel,
+    );
     if (hohChanges.length) {
       violations.push(...hohChanges.map((p) => `modified runtime record ${p} (reverted)`));
       await restorePaths(ws, hohChanges.map((p) => `:(literal)${p}`));
@@ -460,6 +492,9 @@ export async function runLoop(ctx: Ctx, t: number): Promise<LoopResult> {
 
     // ------------------------------------------------- CHECK + TEST (E_t)
     ctx.signal?.throwIfAborted();
+    // Do not pay for worktree setup/checks when a completed Planner or
+    // Developer has already exhausted a role, loop, or run boundary.
+    await ctx.budget.assertCanStartRole(t, "tester");
     process.env.HOH_ROLE = "tester";
     const wt = await mkdtemp(path.join(os.tmpdir(), `hoh-${run.run_id}-loop-${pad(t)}-`));
     const evidenceDir = paths.evidenceDir(t);
@@ -573,6 +608,7 @@ export async function runLoop(ctx: Ctx, t: number): Promise<LoopResult> {
       const immutableCheckRel = `${evidenceRel}/checks/`;
       const testerRuntimeChanges = (await pathsChanged(ws, [".hoh"], { includeIgnored: true })).filter((changed) => {
         const rel = changed.replaceAll(path.sep, "/");
+        if (rel === paths.rel(paths.budget).replaceAll(path.sep, "/")) return false;
         if (rel.startsWith(`${evidenceRel}/`) && !rel.startsWith(immutableCheckRel)) return false;
         return true;
       });
@@ -669,9 +705,15 @@ export async function runLoop(ctx: Ctx, t: number): Promise<LoopResult> {
 
     return { loopIndex: t, planner, developer, evidence };
   } catch (err: any) {
+    try {
+      await ctx.budget.pauseLoop(t);
+    } catch (budgetWriteError: any) {
+      log(`${tag} runtime: WARNING could not persist elapsed budget state: ${budgetWriteError?.message ?? budgetWriteError}`);
+    }
     const failedCapture = failedTranscriptCapture(err);
     if (failedCapture) {
       await restoreFailedRoleRuntimeWrites(ws, paths, t, process.env.HOH_ROLE, failedCapture);
+      await ctx.budget.persist();
     }
     // A failed shell-enabled role may have staged arbitrary workspace paths.
     // Keep those working-tree changes available for a Developer retry, but
@@ -680,6 +722,10 @@ export async function runLoop(ctx: Ctx, t: number): Promise<LoopResult> {
     if (ctx.signal?.aborted) {
       log(`${tag} CANCELLED ${abortMessage(err, ctx.signal)}`);
       throw ctx.signal.reason ?? err;
+    }
+    if (err instanceof BudgetExhaustedError) {
+      log(`${tag} BUDGET_EXHAUSTED ${formatBudgetExhaustion(err.exhaustion)}`);
+      throw err;
     }
     const message = err?.stack ?? String(err);
     await writeJson(paths.errorJson(t), { loop_index: t, message: err?.message ?? String(err), stack: message, at: new Date().toISOString() });
@@ -714,14 +760,16 @@ interface TranscriptCapture {
 }
 
 async function invokeRole(ctx: Ctx, inv: RuntimeRoleInvocation, requiredTool?: string): Promise<InvokeOutcome> {
-  const started = Date.now();
+  let budgetAttempt: string | null = null;
+  let transcript: TranscriptCapture | null = null;
+  let started = 0;
+  let completedHarnessResults = 0;
   const total: RoleUsage = { ...emptyUsage(), turns: 0, duration_ms: 0 };
   let retryCount = 0;
   let attempts = 0;
   let result: RoleResult = { finalText: "", submissions: {}, usage: emptyUsage(), turns: 0 };
   let finalUserPrompt = inv.prompt;
   const maxAttempts = requiredTool ? 2 : 1;
-  const transcript = await beginTranscriptCapture(inv.transcriptPath);
   const { transcriptPath: _transcriptPath, onTranscript: upstreamTranscript, ...harnessInvocation } = inv;
   const signal = inv.signal ?? ctx.signal;
   const onTranscript = (chunk: string) => {
@@ -729,6 +777,9 @@ async function invokeRole(ctx: Ctx, inv: RuntimeRoleInvocation, requiredTool?: s
     upstreamTranscript?.(chunk);
   };
   try {
+    budgetAttempt = await ctx.budget.beginRole(inv.loopIndex, inv.role);
+    started = Date.now();
+    transcript = await beginTranscriptCapture(inv.transcriptPath);
     while (attempts < maxAttempts) {
       signal?.throwIfAborted();
       attempts += 1;
@@ -739,6 +790,11 @@ async function invokeRole(ctx: Ctx, inv: RuntimeRoleInvocation, requiredTool?: s
       assertRolePromptWithinLimit(inv.role, inv.systemPrompt, prompt);
       finalUserPrompt = prompt;
       result = await ctx.harness.invoke({ ...harnessInvocation, prompt, onTranscript, signal });
+      for (const k of ["input", "output", "cacheRead", "cacheWrite", "totalTokens", "cost"] as const) total[k] += result.usage[k] ?? 0;
+      total.turns += result.turns;
+      retryCount += result.retryCount ?? 0;
+      if (result.model) total.model = result.model;
+      completedHarnessResults += 1;
       signal?.throwIfAborted();
       if (ctx.run.protocol_receipt?.mode === "paper") {
         const expected = ctx.run.protocol_receipt.models[inv.role];
@@ -748,20 +804,30 @@ async function invokeRole(ctx: Ctx, inv: RuntimeRoleInvocation, requiredTool?: s
           );
         }
       }
-      for (const k of ["input", "output", "cacheRead", "cacheWrite", "totalTokens", "cost"] as const) total[k] += result.usage[k] ?? 0;
-      total.turns += result.turns;
-      retryCount += result.retryCount ?? 0;
-      if (result.model) total.model = result.model;
       if (!requiredTool || (result.submissions[requiredTool]?.length ?? 0) > 0 || parseJsonBlock(result.finalText)) break;
       ctx.log(`[loop ${pad(inv.loopIndex)}] ${inv.role}: no ${requiredTool} call; retrying (${attempts}/${maxAttempts})`);
     }
+    total.duration_ms = Date.now() - started;
+    if (retryCount > 0) total.retry_count = retryCount;
+    await ctx.budget.completeRole(budgetAttempt, total);
   } catch (error) {
+    if (budgetAttempt) {
+      try {
+        if (completedHarnessResults > 0) {
+          total.duration_ms = Math.max(0, Date.now() - started);
+          if (retryCount > 0) total.retry_count = retryCount;
+        }
+        await ctx.budget.failRole(budgetAttempt, completedHarnessResults > 0 ? total : undefined);
+      } catch (budgetWriteError: any) {
+        ctx.log(
+          `[loop ${pad(inv.loopIndex)}] runtime: WARNING could not close budget attempt ${budgetAttempt}: ${budgetWriteError?.message ?? budgetWriteError}`,
+        );
+      }
+    }
     const failure = error instanceof Error ? error : new Error(String(error));
     if (transcript) Object.defineProperty(failure, FAILED_TRANSCRIPT_CAPTURE, { value: transcript });
     throw failure;
   }
-  total.duration_ms = Date.now() - started;
-  if (retryCount > 0) total.retry_count = retryCount;
   return { result, attempts, usage: total, finalUserPrompt, transcript };
 }
 

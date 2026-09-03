@@ -141,6 +141,11 @@ to the exact candidate, and records every loop in git.
   deterministic checks. Pi aborts the active session, check process groups are
   killed, and a cancelled QA attempt removes its worktree without recording a
   QA verdict or runtime failure.
+- **Persistent resource budgets.** Optional role, loop, and run ceilings for
+  active elapsed time, total tokens, and cost are checked before every role.
+  Completed `RoleUsage` is atomically charged to `.hoh/budget.json`; reaching a
+  ceiling returns the resumable `budget_exhausted` state without creating a QA
+  verdict or `error.json`.
 
 ## Layout of a run (`<workspace>/.hoh/`)
 
@@ -148,6 +153,7 @@ to the exact candidate, and records every loop in git.
 run.json                    run id, budget T, harness, model, checks
 spec.md                     S, the public specification (copied from --spec)
 pi-resources.json           resolved role extension/skill/tool manifest and hashes
+budget.json                 atomic role/loop/run usage ledger and exhaustion state
 ledger.json                 issue ledger
 claims.json                 fixed PRD claim catalog and required evidence types
 coverage.json               per-claim status, last verified loop, verification count
@@ -210,6 +216,11 @@ lists can be discovered from `GET {base_url}/models`. The root config uses
     "websocket_connect_ms": 15000
   },
   "retry": { "enabled": true, "max_retries": 3, "base_delay_ms": 2000, "max_delay_ms": 60000 },
+  "budgets": {
+    "role": { "elapsed_ms": 3600000, "total_tokens": 100000, "cost": 5.5 },
+    "loop": { "elapsed_ms": 10800000, "total_tokens": 250000, "cost": 12.5 },
+    "run": { "elapsed_ms": 32400000, "total_tokens": 750000, "cost": 35.0 }
+  },
   "pi": {}
 }
 ```
@@ -235,6 +246,7 @@ lists can be discovered from `GET {base_url}/models`. The root config uses
 | `timeouts.provider_ms` | per-provider-request ceiling; pi SDK retries stay disabled so the same pi session owns retry classification |
 | `timeouts.output_idle_ms` / `websocket_connect_ms` | stream-silence watchdog and WebSocket handshake ceiling |
 | `retry.*` | same-session transient retry policy: enablement, retry count, exponential-backoff base and maximum accepted server delay |
+| `budgets.role` / `loop` / `run` | optional ceilings with `elapsed_ms` (positive integer), `total_tokens` (positive integer), and fractional `cost` (positive finite number). Omit any scope or metric to leave it unlimited |
 | `pi.agent_dir` | pi's credential/models directory (default `~/.pi/agent`) |
 | `pi.extensions` / `pi.skills` | reviewed workspace-relative resource paths loaded for every role; ambient pi discovery remains disabled |
 | `pi.roles.<role>.extensions` / `skills` | additional resources loaded only for `planner`, `developer`, or `tester` |
@@ -323,7 +335,15 @@ node dist/cli.js status --workspace ../my-game
 
 Re-running with the same workspace resumes after the last completed loop.
 For an `extended` run, `--loops <n>` may extend the budget. For a `paper` run,
-start a new run in another workspace instead of mutating the receipt. If
+the initial token, cost, elapsed, and loop ceilings are part of the immutable
+receipt; start a new run in another workspace instead of raising them. A
+`budget_exhausted` result preserves the partial loop and starts no next role
+until the stored limits permit it. The ledger charges the `RoleUsage` returned
+by each completed role, including Pi's same-session retry totals. The harness
+contract exposes no usage for a call that throws, so such usage is explicitly
+recorded as unavailable and never estimated as zero. Accounting begins with
+the loop-1 Planner; the optional loop-0 claim-drafting extension runs before
+the budget ledger opens and is not included. If
 `claims.json` is absent, `run` asks the
 Planner model to draft it before loop 1 and commits it with the run record.
 The generated catalog is a draft: review its PRD coverage and `requires` fields
@@ -348,6 +368,8 @@ npm test
   stable resume endpoints, and failed checks.
 - `cancellation.test.ts`: check process-group termination and cancellation-safe
   QA worktree cleanup without false QA or runtime-failure records.
+- `budget.test.ts`: config validation, role-boundary blocking, cumulative
+  elapsed/token/cost accounting, resume stability, and error-free exhaustion.
 - `ledger.test.ts`: exact gap identity, duplicate and replay idempotence,
   adjacent-loop escalation, and open/closed/regressed transitions.
 - `config.test.ts`: config merge and validation, paper/extended protocol

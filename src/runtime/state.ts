@@ -5,7 +5,7 @@
  */
 import { mkdir, readdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
-import type { Ledger, Role, RunConfig } from "../types.js";
+import type { BudgetLedger, Ledger, Role, RunConfig } from "../types.js";
 import { pathMatchesHead } from "./git.js";
 import { emptyLedger } from "./ledger.js";
 
@@ -47,6 +47,10 @@ export class RunPaths {
   }
   get ledger() {
     return path.join(this.root, "ledger.json");
+  }
+  /** Canonical role/loop/run resource accounting and exhaustion state. */
+  get budget() {
+    return path.join(this.root, "budget.json");
   }
   get claims() {
     return path.join(this.root, "claims.json");
@@ -136,6 +140,10 @@ export async function loadRun(paths: RunPaths): Promise<RunConfig | null> {
 
 export async function loadLedger(paths: RunPaths): Promise<Ledger> {
   return (await readJson<Ledger>(paths.ledger)) ?? emptyLedger();
+}
+
+export async function loadBudgetLedger(paths: RunPaths): Promise<BudgetLedger | null> {
+  return readJson<BudgetLedger>(paths.budget);
 }
 
 /** Highest loop index that has an evidence bundle (i.e. completed all three roles). */

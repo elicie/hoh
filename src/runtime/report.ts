@@ -3,10 +3,10 @@
  * per loop plus the ledger), and `tester_report.md` per loop.
  */
 import { readFile, readdir } from "node:fs/promises";
-import type { DeveloperRecord, EvidenceBundle, Ledger, PlannerRecord, RunConfig } from "../types.js";
+import type { BudgetLedger, BudgetMetric, DeveloperRecord, EvidenceBundle, Ledger, PlannerRecord, RunConfig } from "../types.js";
 import { coverageSummary, loadClaimCatalog, loadCoverage, renderCoverageTable } from "./coverage.js";
 import { ledgerSummary, renderLedger } from "./ledger.js";
-import { parseLoopDirName, readJson, RunPaths } from "./state.js";
+import { loadBudgetLedger, parseLoopDirName, readJson, RunPaths } from "./state.js";
 
 interface LoopView {
   index: number;
@@ -45,6 +45,7 @@ function fmtTokens(n: number): string {
 
 export async function renderRunReadme(paths: RunPaths, run: RunConfig, ledger: Ledger): Promise<string> {
   const loops = await collectLoops(paths);
+  const budget = await loadBudgetLedger(paths);
   const s = ledgerSummary(ledger);
   const spec = await readFile(paths.spec, "utf8");
   const catalog = await loadClaimCatalog(paths, spec);
@@ -68,6 +69,7 @@ export async function renderRunReadme(paths: RunPaths, run: RunConfig, ledger: L
     lines.push(`**Initial iteration budget:** ${run.protocol_receipt.initial_loops}  `);
   }
   lines.push(`**Config:** \`.hoh/config.json\` (from ${run.config_source})`, "");
+  if (budget) renderBudgetSummary(lines, budget);
   lines.push("---", "", "## Persistent issue ledger", "");
   lines.push("| Field | Value |", "| --- | --- |");
   lines.push(`| Open | ${s.open} |`, `| Regressed | ${s.regressed} |`, `| Closed | ${s.closed} |`, `| All | ${s.all} |`, "");
@@ -135,8 +137,62 @@ export async function renderRunReadme(paths: RunPaths, run: RunConfig, ledger: L
   return lines.join("\n");
 }
 
+function renderBudgetSummary(lines: string[], budget: BudgetLedger): void {
+  lines.push("---", "", "## Resource budget ledger", "");
+  lines.push("| Field | Value |", "| --- | --- |");
+  lines.push(`| Status | ${budget.status.toUpperCase()} |`);
+  lines.push(`| Run elapsed | ${formatDuration(budget.totals.elapsed_ms)} |`);
+  lines.push(`| Run tokens | ${fmtTokens(budget.totals.total_tokens)} |`);
+  lines.push(`| Run cost | ${formatCost(budget.totals.cost)} |`);
+  lines.push(
+    `| Current role | ${budget.current_role ? `loop ${String(budget.current_role.loop_index).padStart(2, "0")} / ${budget.current_role.role} (since ${budget.current_role.started_at})` : "none"} |`,
+  );
+  if (budget.exhaustion) {
+    const exhaustion = budget.exhaustion;
+    lines.push(
+      `| Exhaustion | ${exhaustion.scope}${exhaustion.loop_index ? ` loop ${exhaustion.loop_index}` : ""}${exhaustion.role ? ` ${exhaustion.role}` : ""}: ${exhaustion.metric} ${formatBudgetMetric(exhaustion.metric, exhaustion.used)} / ${formatBudgetMetric(exhaustion.metric, exhaustion.limit)}${exhaustion.before_role ? `; blocked before ${exhaustion.before_role}` : ""} |`,
+    );
+  }
+  lines.push("");
+
+  lines.push("### Configured ceilings", "");
+  lines.push("| Scope | Elapsed | Tokens | Cost |", "| --- | ---: | ---: | ---: |");
+  for (const scope of ["role", "loop", "run"] as const) {
+    const limit = budget.limits[scope];
+    lines.push(
+      `| ${scope} | ${limit?.elapsed_ms === undefined ? "unlimited" : formatDuration(limit.elapsed_ms)} | ${limit?.total_tokens === undefined ? "unlimited" : fmtTokens(limit.total_tokens)} | ${limit?.cost === undefined ? "unlimited" : formatCost(limit.cost)} |`,
+    );
+  }
+  lines.push("");
+
+  if (Object.keys(budget.loops).length) {
+    lines.push("### Charged loop totals", "");
+    lines.push("| Loop | Elapsed | Tokens | Cost |", "| ---: | ---: | ---: | ---: |");
+    for (const loop of Object.values(budget.loops).sort((a, b) => a.loop_index - b.loop_index)) {
+      lines.push(
+        `| ${String(loop.loop_index).padStart(2, "0")} | ${formatDuration(loop.totals.elapsed_ms)} | ${fmtTokens(loop.totals.total_tokens)} | ${formatCost(loop.totals.cost)} |`,
+      );
+    }
+    lines.push("");
+  }
+  lines.push(
+    "Completed role usage is charged exactly as reported (including same-session Pi retries). A harness call that fails before returning usage is recorded as unavailable and is not estimated.",
+    "",
+  );
+}
+
 function formatDuration(durationMs: number): string {
   return `${(durationMs / 1000).toFixed(1)}s`;
+}
+
+function formatCost(cost: number): string {
+  return `$${cost.toFixed(6)}`;
+}
+
+function formatBudgetMetric(metric: BudgetMetric, value: number): string {
+  if (metric === "elapsed_ms") return formatDuration(value);
+  if (metric === "total_tokens") return fmtTokens(value);
+  return formatCost(value);
 }
 
 export function renderTesterReport(e: EvidenceBundle): string {

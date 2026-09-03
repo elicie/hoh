@@ -49,8 +49,8 @@ import { runHoh } from "./runtime/loop.js";
 import { coverageSummary, loadClaimCatalog, loadCoverage } from "./runtime/coverage.js";
 import { commitAll, ensureRepo, RUNTIME_IDENTITY } from "./runtime/git.js";
 import { collectLoops } from "./runtime/report.js";
-import { loadLedger, loadRun, readJson, RunPaths } from "./runtime/state.js";
-import { ROLES } from "./types.js";
+import { loadBudgetLedger, loadLedger, loadRun, readJson, RunPaths } from "./runtime/state.js";
+import { ROLES, type BudgetLedger } from "./types.js";
 
 const USAGE = `hoh — Harness-of-Harness runtime on top of the pi coding agent
 
@@ -177,6 +177,7 @@ async function showStatus(workspace: string): Promise<number> {
   const catalog = await loadClaimCatalog(paths, spec);
   const coverage = catalog ? await loadCoverage(paths, catalog) : null;
   const loops = await collectLoops(paths);
+  const budget = await loadBudgetLedger(paths);
   const models = ROLES.map((r) => `${r}=${modelForRole(run.config, r) ?? "(harness default)"}`).join(", ");
   const receipt = run.protocol_receipt;
   process.stdout.write(
@@ -184,6 +185,7 @@ async function showStatus(workspace: string): Promise<number> {
   );
   if (receipt) process.stdout.write(`Protocol receipt: ${receipt.protocol_sha256}\n`);
   process.stdout.write(`Models: ${models}\n`);
+  if (budget) printBudgetStatus(budget);
   process.stdout.write(`Ledger: open ${s.open}, regressed ${s.regressed}, closed ${s.closed}, all ${s.all}\n\n`);
   if (catalog && coverage) {
     const c = coverageSummary(catalog, coverage);
@@ -198,6 +200,35 @@ async function showStatus(workspace: string): Promise<number> {
   }
   process.stdout.write(`\nRecord: ${paths.readme}\nConfig: ${paths.config}\n`);
   return 0;
+}
+
+function printBudgetStatus(budget: BudgetLedger): void {
+  process.stdout.write(
+    `Resource budget: ${budget.status.toUpperCase()} — elapsed ${formatElapsed(budget.totals.elapsed_ms)}, tokens ${budget.totals.total_tokens.toLocaleString("en-US")}, cost $${budget.totals.cost.toFixed(6)}\n`,
+  );
+  if (budget.current_role) {
+    const current = budget.current_role;
+    const activeMs = Math.max(0, Date.now() - Date.parse(current.started_at));
+    process.stdout.write(
+      `Budget role: loop ${current.loop_index} / ${current.role}, active ${formatElapsed(activeMs)}; ceilings ${formatBudgetCeiling("role", budget.limits.role)}, ${formatBudgetCeiling("loop", budget.limits.loop)}, ${formatBudgetCeiling("run", budget.limits.run)}\n`,
+    );
+  }
+  if (budget.exhaustion) {
+    const hit = budget.exhaustion;
+    process.stdout.write(
+      `Budget exhaustion: ${hit.scope}${hit.loop_index ? ` loop ${hit.loop_index}` : ""}${hit.role ? ` ${hit.role}` : ""} ${hit.metric} ${hit.used} / ${hit.limit}${hit.before_role ? `; blocked before ${hit.before_role}` : ""}\n`,
+    );
+  }
+}
+
+function formatBudgetCeiling(scope: "role" | "loop" | "run", limit: BudgetLedger["limits"][typeof scope]): string {
+  if (!limit || Object.values(limit).every((value) => value === undefined)) return `${scope}=unlimited`;
+  const values = [
+    limit.elapsed_ms === undefined ? null : `${formatElapsed(limit.elapsed_ms)} elapsed`,
+    limit.total_tokens === undefined ? null : `${limit.total_tokens.toLocaleString("en-US")} tokens`,
+    limit.cost === undefined ? null : `$${limit.cost.toFixed(6)}`,
+  ].filter((value): value is string => value !== null);
+  return `${scope}=${values.join("/")}`;
 }
 
 function printLifecycleStatus(state: LifecycleState): void {
@@ -333,7 +364,15 @@ async function main(argv: string[]): Promise<number> {
         runLog(`  loop ${x.loopIndex}: ${x.evidence.qa_status.toUpperCase()} ${x.developer.candidate_id} — ${x.planner.objective}`);
       }
       runLog(`record: ${new RunPaths(r.workspace).readme}`);
-      await lifecycle.finish("completed", 0);
+      if (result.status === "budget_exhausted") {
+        const exhaustion = result.budget.exhaustion;
+        const message = exhaustion
+          ? `${exhaustion.scope} ${exhaustion.metric} budget exhausted (${exhaustion.used}/${exhaustion.limit})`
+          : "resource budget exhausted";
+        await lifecycle.finish("budget_exhausted", 0, message);
+      } else {
+        await lifecycle.finish("completed", 0);
+      }
       return 0;
     } catch (error: any) {
       const stopped = lifecycle.signal.aborted && lifecycle.cancellationSource !== "control-error";

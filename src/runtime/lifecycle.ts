@@ -11,7 +11,7 @@ const DEFAULT_READY_WAIT_MS = 10_000;
 const ACTIVE_STATUSES = ["starting", "running", "stopping"] as const;
 
 type ActiveLifecycleStatus = (typeof ACTIVE_STATUSES)[number];
-export type LifecycleStatus = ActiveLifecycleStatus | "completed" | "failed" | "stopped";
+export type LifecycleStatus = ActiveLifecycleStatus | "completed" | "budget_exhausted" | "failed" | "stopped";
 export type LifecyclePhase = "initializing" | "planner" | "developer" | "check" | "tester";
 
 export interface LifecycleState {
@@ -341,7 +341,7 @@ export class RunLifecycle {
     appendFileSync(this.paths.log, line, { encoding: "utf8", mode: 0o600 });
   }
 
-  async finish(status: "completed" | "failed" | "stopped", exitCode: number, message?: string): Promise<void> {
+  async finish(status: "completed" | "budget_exhausted" | "failed" | "stopped", exitCode: number, message?: string): Promise<void> {
     if (this.timer) clearInterval(this.timer);
     this.timer = undefined;
     const next: Partial<LifecycleState> = {

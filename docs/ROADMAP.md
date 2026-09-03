@@ -46,7 +46,7 @@
 | 4 | 논문 실행 계약 고정 | Core | 완료 | 유지 | – | – |
 | 5 | 저장소·CI·문서 기준선 | Ops | 완료 | 유지 | – | – |
 | 6 | QA에 후보 diff 제공 | Core | 완료 | 유지 | – | – |
-| 7 | 장기 실행 제어·예산·재시도 | Ops | 부분 완료 | P1 | 1.5~2일 | 4 |
+| 7 | 장기 실행 제어·예산·재시도 | Ops | 완료 | 유지 | – | 4 |
 | 8 | 원장 에스컬레이션 / 후보 복구 | Core / Draft | 8A 완료 / 8B 필요 시 | 유지 | – | 1, 2 |
 | 9 | 점진적 컨텍스트 노출과 프롬프트 정리 | Core | 완료 | 유지 | – | 2, 6 |
 | 10 | 역할별 pi 확장·스킬 주입 | Full | 완료 | 유지 | – | 4 |
@@ -129,7 +129,7 @@ Developer 전후의 전체 Git SHA를 candidate record에 고정하고, QA workt
 
 자동 테스트는 정확한 base/candidate SHA, artifact 경계 밖 파일과 `.hoh` 제외, 대형 diff 본문 제거와 byte 상한, runtime-only HEAD가 전진한 뒤의 QA resume을 검증한다.
 
-## 7. 장기 실행 제어·예산·재시도 — 부분 완료
+## 7. 장기 실행 제어·예산·재시도 — 완료
 
 재개와 상태 기록은 있으나 장시간 무인 실행을 위한 lifecycle 제어가 부족하다. 이 항목은 논문 알고리즘의 필수 조건이 아니라 운영 안정성 작업이다.
 
@@ -143,16 +143,15 @@ Developer 전후의 전체 Git SHA를 candidate record에 고정하고, QA workt
 - `run --detach`, `status`, `stop`, `logs -f`가 Git metadata 아래의 process state·lock·log를 사용하며, stop 요청과 CLI SIGTERM/SIGINT는 같은 `AbortSignal` 정리 경로로 들어간다.
 - Linux에서는 PID뿐 아니라 boot id와 `/proc/<pid>/stat` start time을 함께 확인해 PID 재사용으로 stale run이나 lock을 현재 프로세스로 오인하지 않는다.
 - status는 현재 loop·역할·경과 시간을 표시하고, compiled CLI 통합 테스트는 stop과 SIGTERM 뒤 check process와 QA worktree가 남지 않는지 확인한다.
-
-남은 작업:
-
-- 역할·루프·run 단위 토큰/비용/시간 예산과 `budget_exhausted` 종료 상태
+- 선택적 역할·루프·run 단위 elapsed/token/cost 한도와 원자적 `.hoh/budget.json` 원장을 둔다. 완료된 `RoleUsage`와 같은 세션 retry 사용량만 charge하고, 실패 호출이 usage를 반환하지 않았으면 0으로 추정하지 않고 unavailable로 기록한다.
+- 각 역할 경계에서 한도를 재검사한다. 다음 역할을 시작할 수 없으면 `error.json`이나 QA verdict를 만들지 않고 재개 가능한 `budget_exhausted` run/lifecycle 상태로 끝낸다. 정확히 한도에 도달한 최종 역할은 완료로 인정하고, 초과한 사용량은 exhausted로 남긴다.
+- status와 Markdown report는 현재 역할·활성 경과 시간·configured ceiling, run/loop totals, exhaustion 원인을 표시한다. 선택적 loop-0 claim catalog 초안 호출은 loop-1에서 시작하는 이 원장의 범위 밖임을 명시한다.
 
 모델이 낸 QA 실패나 개발 결과를 전송 오류처럼 자동 재시도하지 않는다. 사람 체크포인트는 `extended` 프로토콜에서만 선택적으로 제공한다.
 
 `paper` run이 예산을 소진한 뒤 resume할 때는 기존 한도 안의 미완료 시도만 이어갈 수 있다. `T`, 토큰, 비용 한도를 늘리려면 원 run을 보존한 새 run/fork로 기록한다.
 
-**수용 기준.** detach한 모의 run을 status/stop으로 제어할 수 있고, SIGTERM 뒤 고아 worktree가 남지 않는다. 가짜 provider의 일시적 503은 설정 횟수만큼 재시도하며, 예산 초과는 재개 가능한 명시적 상태로 끝난다.
+**수용 기준.** detach한 모의 run을 status/stop으로 제어할 수 있고, SIGTERM 뒤 고아 worktree가 남지 않는다. 가짜 provider의 일시적 503은 설정 횟수만큼 재시도하며, 예산 초과는 재개 가능한 명시적 상태로 끝난다. 자동 테스트가 세 경로를 모두 검증한다.
 
 ## 8. 원장 에스컬레이션 / 후보 복구 — 부분 완료
 
