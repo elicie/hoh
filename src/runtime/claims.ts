@@ -18,6 +18,7 @@ export interface ClaimGenerationOptions {
   /** Concrete model identity required by a paper run's start receipt. */
   expectedModel?: string;
   timeoutMs?: number;
+  signal?: AbortSignal;
 }
 
 export interface ClaimState {
@@ -30,6 +31,7 @@ export async function generateClaimCatalog(options: ClaimGenerationOptions): Pro
   const prompts = await renderClaimDraftPrompts({ cwd: options.workspace, specPath: options.specPath, spec: options.spec });
   let lastProblem = `planner returned no ${SUBMIT_CLAIMS_TOOL} call`;
   for (let attempt = 1; attempt <= 2; attempt += 1) {
+    options.signal?.throwIfAborted();
     const prompt =
       attempt === 1
         ? prompts.user
@@ -48,6 +50,7 @@ export async function generateClaimCatalog(options: ClaimGenerationOptions): Pro
           transcript += chunk;
         },
         timeoutMs: options.timeoutMs,
+        signal: options.signal,
         model: options.model,
       })
       .finally(async () => {
@@ -55,6 +58,7 @@ export async function generateClaimCatalog(options: ClaimGenerationOptions): Pro
         await mkdir(options.paths.root, { recursive: true });
         await appendFile(options.paths.claimsTranscript, transcript);
       });
+    options.signal?.throwIfAborted();
     if (options.expectedModel && result.model !== options.expectedModel) {
       throw new Error(
         `paper protocol model mismatch for planner claim initialization: expected ${options.expectedModel}, harness reported ${result.model ?? "(none)"}`,
@@ -76,10 +80,13 @@ export async function ensureClaimState(options: ClaimGenerationOptions): Promise
   let created = false;
   if (!catalog) {
     catalog = await generateClaimCatalog(options);
+    options.signal?.throwIfAborted();
     await writeJson(options.paths.claims, catalog);
     created = true;
   }
+  options.signal?.throwIfAborted();
   const coverage = await rebuildCoverage(options.paths, catalog);
+  options.signal?.throwIfAborted();
   await writeJson(options.paths.coverage, coverage);
   return { catalog, coverage, created };
 }
@@ -89,8 +96,10 @@ export async function initializeClaimState(options: ClaimGenerationOptions): Pro
     throw new Error(`${options.paths.claims} already exists; edit it directly or remove it before regenerating`);
   }
   const catalog = await generateClaimCatalog(options);
+  options.signal?.throwIfAborted();
   const coverage = emptyCoverage(catalog);
   await writeJson(options.paths.claims, catalog);
+  options.signal?.throwIfAborted();
   await writeJson(options.paths.coverage, coverage);
   return { catalog, coverage, created: true };
 }

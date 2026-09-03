@@ -136,6 +136,11 @@ to the exact candidate, and records every loop in git.
   and after loading, and included in new protocol receipts. Extensions are
   trusted executable code, not a sandbox: use reviewed local code and scoped
   credentials even when its LLM-callable tools are restricted.
+- **Cooperative cancellation.** Library callers may pass `signal` to `runHoh`.
+  It propagates through claim drafting, every role invocation, setup, and
+  deterministic checks. Pi aborts the active session, check process groups are
+  killed, and a cancelled QA attempt removes its worktree without recording a
+  QA verdict or runtime failure.
 
 ## Layout of a run (`<workspace>/.hoh/`)
 
@@ -331,6 +336,8 @@ npm test
 - `loop.test.ts`: end-to-end loops with a scripted harness, candidate freezing,
   artifact-scoped bounded QA diffs, `.hoh/` guard, retry and fallback paths,
   stable resume endpoints, and failed checks.
+- `cancellation.test.ts`: check process-group termination and cancellation-safe
+  QA worktree cleanup without false QA or runtime-failure records.
 - `ledger.test.ts`: exact gap identity, duplicate and replay idempotence,
   adjacent-loop escalation, and open/closed/regressed transitions.
 - `config.test.ts`: config merge and validation, paper/extended protocol

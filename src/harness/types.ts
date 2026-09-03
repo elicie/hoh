@@ -37,6 +37,8 @@ export interface RoleInvocation {
   /** Trusted adapter events; the runtime keeps these bytes out of role-visible files until the role exits. */
   onTranscript?: (chunk: string) => void;
   timeoutMs?: number;
+  /** Cooperative cancellation owned by the outer runtime lifecycle. */
+  signal?: AbortSignal;
   /** harness-specific model pattern for this role (from config); undefined = harness default */
   model?: string;
 }

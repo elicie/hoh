@@ -83,6 +83,8 @@ export interface RunOptions {
   /** human-readable origin of `config`, for the record */
   configSource?: string;
   log?: Logger;
+  /** Cooperative stop signal propagated through role sessions and deterministic checks. */
+  signal?: AbortSignal;
 }
 
 export interface LoopResult {
@@ -109,9 +111,11 @@ interface Ctx {
   log: Logger;
   claimCatalog: ClaimCatalog;
   coverage: CoverageState;
+  signal?: AbortSignal;
 }
 
 export async function runHoh(opts: RunOptions): Promise<RunResult> {
+  opts.signal?.throwIfAborted();
   const ws = path.resolve(opts.workspace);
   await mkdir(ws, { recursive: true });
   const paths = new RunPaths(ws);
@@ -211,6 +215,7 @@ export async function runHoh(opts: RunOptions): Promise<RunResult> {
     model: modelForRole(config, "planner"),
     expectedModel: run.protocol_receipt?.mode === "paper" ? run.protocol_receipt.models.planner ?? undefined : undefined,
     timeoutMs: config.timeouts.role_min * 60_000,
+    signal: opts.signal,
   });
   await writeText(paths.readme, await renderRunReadme(paths, run, await loadLedger(paths)));
   if (initialized) {
@@ -232,7 +237,17 @@ export async function runHoh(opts: RunOptions): Promise<RunResult> {
   process.env.HOH_RUN_ID = run.run_id;
   await git(["worktree", "prune"], ws, { allowFail: true });
 
-  const ctx: Ctx = { ws, paths, run, config, harness: opts.harness, log, claimCatalog: claimState.catalog, coverage: claimState.coverage };
+  const ctx: Ctx = {
+    ws,
+    paths,
+    run,
+    config,
+    harness: opts.harness,
+    log,
+    claimCatalog: claimState.catalog,
+    coverage: claimState.coverage,
+    signal: opts.signal,
+  };
   const done = await lastCompletedLoop(paths);
   const results: LoopResult[] = [];
   for (let t = done + 1; t <= config.loops; t++) {
@@ -245,6 +260,7 @@ export async function runHoh(opts: RunOptions): Promise<RunResult> {
 // ---------------------------------------------------------------------------
 
 export async function runLoop(ctx: Ctx, t: number): Promise<LoopResult> {
+  ctx.signal?.throwIfAborted();
   const { ws, paths, run, config, log } = ctx;
   const tag = `[loop ${pad(t)}]`;
   const roleTimeoutMs = config.timeouts.role_min * 60_000;
@@ -443,12 +459,14 @@ export async function runLoop(ctx: Ctx, t: number): Promise<LoopResult> {
     const commitRange = await resolveDeveloperCommitRange(ws, developer);
 
     // ------------------------------------------------- CHECK + TEST (E_t)
+    ctx.signal?.throwIfAborted();
     process.env.HOH_ROLE = "tester";
     const wt = await mkdtemp(path.join(os.tmpdir(), `hoh-${run.run_id}-loop-${pad(t)}-`));
     const evidenceDir = paths.evidenceDir(t);
     await prepareEvidenceDirectory(evidenceDir);
     let evidence: EvidenceBundle;
     let evidenceBound = false;
+    let qaFailed = false;
     try {
       await worktreeAdd(ws, commitRange.candidateCommit, wt);
       const wtArtifact = path.resolve(wt, artifactDir);
@@ -482,10 +500,11 @@ export async function runLoop(ctx: Ctx, t: number): Promise<LoopResult> {
             config.timeouts.check_min * 60_000,
             checkEnv,
             { directory: evidenceDir, basename: "00-setup" },
+            ctx.signal,
           ),
         );
       }
-      checks.push(...(await runChecks(config.checks, wtArtifact, config.timeouts.check_min * 60_000, checkEnv)));
+      checks.push(...(await runChecks(config.checks, wtArtifact, config.timeouts.check_min * 60_000, checkEnv, ctx.signal)));
       for (const c of checks) {
         const lastLine = (c.stderr_tail || c.stdout_tail).trim().split("\n").filter(Boolean).pop() ?? "";
         log(`${tag} check ${c.name}: ${c.status} (${(c.duration_ms / 1000).toFixed(1)}s)${c.status === "pass" ? "" : ` — ${lastLine.slice(0, 160)}`}`);
@@ -509,6 +528,7 @@ export async function runLoop(ctx: Ctx, t: number): Promise<LoopResult> {
       );
 
       log(`${tag} tester: start`);
+      ctx.signal?.throwIfAborted();
       const testerPrompts = await renderTesterPrompts({
         loopIndex: t,
         cwd: wt,
@@ -539,7 +559,9 @@ export async function runLoop(ctx: Ctx, t: number): Promise<LoopResult> {
         },
         SUBMIT_EVIDENCE_TOOL,
       );
+      ctx.signal?.throwIfAborted();
       const after = await artifactTreeHash(wt, { subdir: artifactDir });
+      ctx.signal?.throwIfAborted();
       // The Tester works in the worktree, but bash could still reach the main workspace by absolute path.
       const testerGuardSpec = [".", ":(exclude).hoh"];
       const testerWorkspaceChanges = await pathsChanged(ws, testerGuardSpec);
@@ -576,6 +598,7 @@ export async function runLoop(ctx: Ctx, t: number): Promise<LoopResult> {
       );
       const submission =
         lastSubmission<EvidenceSubmission>(testerRun.result, SUBMIT_EVIDENCE_TOOL) ?? parseJsonBlock<EvidenceSubmission>(testerRun.result.finalText);
+      ctx.signal?.throwIfAborted();
       evidence = await bindEvidenceFiles(
         normalizeEvidence({
           submission,
@@ -594,20 +617,39 @@ export async function runLoop(ctx: Ctx, t: number): Promise<LoopResult> {
         evidenceDir,
         ctx.claimCatalog,
       );
+      ctx.signal?.throwIfAborted();
       evidenceBound = true;
+    } catch (error) {
+      qaFailed = true;
+      throw error;
     } finally {
+      let cleanupFailed = false;
+      let cleanupFailure: unknown;
       try {
         if (!evidenceBound) {
           const notes = await sanitizeEvidenceDirectory(evidenceDir);
           for (const note of notes) log(`${tag} runtime: ${note}`);
         }
-      } finally {
+      } catch (error) {
+        cleanupFailed = true;
+        cleanupFailure = error;
+      }
+      try {
         await worktreeRemove(ws, wt);
+      } catch (error) {
+        if (!cleanupFailed) cleanupFailure = error;
+        cleanupFailed = true;
+      } finally {
         delete process.env.HOH_CANDIDATE_DIR;
         delete process.env.HOH_EVIDENCE_DIR;
       }
+      if (cleanupFailed) {
+        if (!qaFailed && !ctx.signal?.aborted) throw cleanupFailure;
+        log(`${tag} runtime: WARNING QA cleanup also failed: ${cleanupFailure instanceof Error ? cleanupFailure.message : String(cleanupFailure)}`);
+      }
     }
 
+    ctx.signal?.throwIfAborted();
     const delta = applyEvidence(ledger, evidence);
     await rm(paths.errorJson(t), { force: true }); // a previous failed attempt of this loop is superseded
     await writeJson(paths.ledger, ledger);
@@ -635,6 +677,10 @@ export async function runLoop(ctx: Ctx, t: number): Promise<LoopResult> {
     // Keep those working-tree changes available for a Developer retry, but
     // clear the shared index so the runtime error commit can contain only .hoh.
     await git(["reset", "-q", "HEAD", "--", "."], ws);
+    if (ctx.signal?.aborted) {
+      log(`${tag} CANCELLED ${abortMessage(err, ctx.signal)}`);
+      throw ctx.signal.reason ?? err;
+    }
     const message = err?.stack ?? String(err);
     await writeJson(paths.errorJson(t), { loop_index: t, message: err?.message ?? String(err), stack: message, at: new Date().toISOString() });
     await writeText(paths.readme, await renderRunReadme(paths, run, await loadLedger(paths)));
@@ -676,12 +722,14 @@ async function invokeRole(ctx: Ctx, inv: RuntimeRoleInvocation, requiredTool?: s
   const maxAttempts = requiredTool ? 2 : 1;
   const transcript = await beginTranscriptCapture(inv.transcriptPath);
   const { transcriptPath: _transcriptPath, onTranscript: upstreamTranscript, ...harnessInvocation } = inv;
+  const signal = inv.signal ?? ctx.signal;
   const onTranscript = (chunk: string) => {
     if (transcript) transcript.content += chunk;
     upstreamTranscript?.(chunk);
   };
   try {
     while (attempts < maxAttempts) {
+      signal?.throwIfAborted();
       attempts += 1;
       const prompt =
         attempts === 1
@@ -689,7 +737,8 @@ async function invokeRole(ctx: Ctx, inv: RuntimeRoleInvocation, requiredTool?: s
           : `${inv.prompt}\n\n## Runtime notice\n\nYour previous attempt ended without calling \`${requiredTool}\`. The runtime only accepts output delivered through that tool. Redo the work as needed and call \`${requiredTool}\` exactly once before finishing.`;
       assertRolePromptWithinLimit(inv.role, inv.systemPrompt, prompt);
       finalUserPrompt = prompt;
-      result = await ctx.harness.invoke({ ...harnessInvocation, prompt, onTranscript });
+      result = await ctx.harness.invoke({ ...harnessInvocation, prompt, onTranscript, signal });
+      signal?.throwIfAborted();
       if (ctx.run.protocol_receipt?.mode === "paper") {
         const expected = ctx.run.protocol_receipt.models[inv.role];
         if (!expected || result.model !== expected) {
@@ -711,6 +760,11 @@ async function invokeRole(ctx: Ctx, inv: RuntimeRoleInvocation, requiredTool?: s
   }
   total.duration_ms = Date.now() - started;
   return { result, attempts, usage: total, finalUserPrompt, transcript };
+}
+
+function abortMessage(error: unknown, signal: AbortSignal | undefined): string {
+  const reason = signal?.reason ?? error;
+  return reason instanceof Error ? reason.message : String(reason ?? "operation aborted");
 }
 
 async function beginTranscriptCapture(finalPath: string | undefined): Promise<TranscriptCapture | null> {

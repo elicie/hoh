@@ -82,6 +82,7 @@ export class PiHarness implements Harness {
   }
 
   async invoke(inv: RoleInvocation): Promise<RoleResult> {
+    inv.signal?.throwIfAborted();
     await this.opts.verifyResourceManifest?.(inv.role);
     const modelRuntime = await this.getRuntime();
     const agentDir = this.opts.agentDir ?? getAgentDir();
@@ -116,7 +117,9 @@ export class PiHarness implements Harness {
       systemPromptOverride: () => inv.systemPrompt,
       appendSystemPromptOverride: () => [],
     });
+    inv.signal?.throwIfAborted();
     await loader.reload();
+    inv.signal?.throwIfAborted();
     await this.opts.verifyResourceManifest?.(inv.role);
     assertLoadedRoleResources(loader, inv.role, roleResources);
 
@@ -188,7 +191,7 @@ export class PiHarness implements Harness {
     });
 
     try {
-      await withTimeout(session.prompt(inv.prompt), inv.timeoutMs, async () => {
+      await withInvocationDeadline(() => session.prompt(inv.prompt), inv.timeoutMs, inv.signal, async () => {
         await session.abort();
       });
     } finally {
@@ -286,21 +289,79 @@ function truncate(_key: string, value: unknown): unknown {
   return value;
 }
 
-async function withTimeout<T>(p: Promise<T>, ms: number | undefined, onTimeout: () => Promise<void>): Promise<T> {
-  if (!ms || ms <= 0) return p;
+/** @internal Exported so the cancellation ordering contract can be regression-tested. */
+export async function withInvocationDeadline<T>(
+  operation: () => Promise<T>,
+  timeoutMs: number | undefined,
+  signal: AbortSignal | undefined,
+  onCancel: () => Promise<void>,
+): Promise<T> {
+  signal?.throwIfAborted();
   let timer: NodeJS.Timeout | undefined;
-  const timeout = new Promise<never>((_, reject) => {
-    timer = setTimeout(async () => {
-      try {
-        await onTimeout();
-      } finally {
-        reject(new Error(`pi: role invocation exceeded ${Math.round(ms / 60000)} min and was aborted`));
-      }
-    }, ms);
-  });
+  let onAbort: (() => void) | undefined;
   try {
-    return await Promise.race([p, timeout]);
+    return await new Promise<T>((resolve, reject) => {
+      let settled = false;
+      let cancelling = false;
+      const cancel = (failure: Error) => {
+        if (settled || cancelling) return;
+        cancelling = true;
+        void Promise.resolve()
+          .then(onCancel)
+          .then(
+            () => {
+              settled = true;
+              reject(failure);
+            },
+            () => {
+              // Cancellation owns the outcome once it starts. Preserve the
+              // timeout/operator reason even if the SDK's abort cleanup fails.
+              settled = true;
+              reject(failure);
+            },
+          );
+      };
+      if (timeoutMs && timeoutMs > 0) {
+        timer = setTimeout(() => {
+          cancel(new Error(`pi: role invocation exceeded ${Math.round(timeoutMs / 60000)} min and was aborted`));
+        }, timeoutMs);
+      }
+      if (signal) {
+        onAbort = () => cancel(abortFailure(signal));
+        signal.addEventListener("abort", onAbort, { once: true });
+        if (signal.aborted) onAbort();
+      }
+      if (cancelling) return;
+      let pending: Promise<T>;
+      try {
+        pending = operation();
+      } catch (error) {
+        settled = true;
+        reject(error);
+        return;
+      }
+      pending.then(
+        (value) => {
+          if (settled || cancelling) return;
+          settled = true;
+          resolve(value);
+        },
+        (error) => {
+          if (settled || cancelling) return;
+          settled = true;
+          reject(error);
+        },
+      );
+    });
   } finally {
     if (timer) clearTimeout(timer);
+    if (signal && onAbort) signal.removeEventListener("abort", onAbort);
   }
+}
+
+function abortFailure(signal: AbortSignal): Error {
+  if (signal.reason instanceof Error) return signal.reason;
+  const error = new Error(signal.reason === undefined ? "operation aborted" : String(signal.reason));
+  error.name = "AbortError";
+  return error;
 }

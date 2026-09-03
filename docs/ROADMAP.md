@@ -115,7 +115,7 @@
 
 ## 5. 저장소·CI·문서 기준선 — 완료
 
-런타임, PRD coverage, 재현 가능한 검증이 의미 단위 커밋으로 정리돼 있고 CI와 README, 예제가 현재 동작과 맞춰져 있다. 기준일 현재 `npm test` 결과는 69/69 통과다.
+런타임, PRD coverage, 재현 가능한 검증이 의미 단위 커밋으로 정리돼 있고 CI와 README, 예제가 현재 동작과 맞춰져 있다. 기준일 현재 `npm test` 결과는 74/74 통과다.
 
 ## 6. QA에 후보 diff 제공 — 완료
 
@@ -133,10 +133,16 @@ Developer 전후의 전체 Git SHA를 candidate record에 고정하고, QA workt
 
 재개와 상태 기록은 있으나 장시간 무인 실행을 위한 lifecycle 제어가 부족하다. 이 항목은 논문 알고리즘의 필수 조건이 아니라 운영 안정성 작업이다.
 
+완료된 기반:
+
+- `runHoh`의 `AbortSignal`을 loop-0 claim 작성, 모든 역할 호출, setup과 deterministic check까지 전달한다.
+- 외부 취소 시 pi session을 abort하고 check의 전체 process group을 종료한다.
+- Tester 취소를 QA 실패나 runtime error로 기록하지 않으며 임시 QA worktree와 환경 경계를 정리한다.
+
 남은 작업:
 
 - `run --detach`, PID·로그 기록, `stop`, `logs -f`, 현재 역할·경과 시간 표시
-- SIGTERM 시 진행 중 역할 종료와 임시 QA worktree 정리
+- CLI SIGTERM·stop 요청을 위 취소 계약에 연결
 - 역할·루프·run 단위 토큰/비용/시간 예산과 `budget_exhausted` 종료 상태
 - transport timeout, 5xx, 연결 끊김에 한정한 역할 단위 재시도와 지수 backoff
 - 출력 정지 watchdog과 재시도 이력 보존

@@ -30,18 +30,22 @@ export class MockHarness implements Harness {
   }
 
   async invoke(inv: RoleInvocation): Promise<RoleResult> {
+    inv.signal?.throwIfAborted();
     this.calls.push({ role: inv.role, loopIndex: inv.loopIndex, prompt: inv.prompt, model: inv.model });
     const submissions: Record<string, unknown[]> = {};
     const api: MockApi = {
       submit: (tool, payload) => {
+        inv.signal?.throwIfAborted();
         (submissions[tool] ??= []).push(payload);
       },
       write: async (rel, content) => {
+        inv.signal?.throwIfAborted();
         const file = path.resolve(inv.cwd, rel);
         await mkdir(path.dirname(file), { recursive: true });
         await writeFile(file, content);
       },
       read: async (rel) => {
+        inv.signal?.throwIfAborted();
         try {
           return await readFile(path.resolve(inv.cwd, rel), "utf8");
         } catch {
@@ -49,6 +53,7 @@ export class MockHarness implements Harness {
         }
       },
       exists: async (rel) => {
+        inv.signal?.throwIfAborted();
         try {
           await readFile(path.resolve(inv.cwd, rel));
           return true;
@@ -58,6 +63,7 @@ export class MockHarness implements Harness {
       },
     };
     const text = (await this.scripts[inv.role]?.(inv, api)) ?? "";
+    inv.signal?.throwIfAborted();
     inv.onTranscript?.(
       `${JSON.stringify({ ts: new Date().toISOString(), type: "mock_invocation", role: inv.role, loop: inv.loopIndex, systemPrompt: inv.systemPrompt, prompt: inv.prompt, finalText: text, submissions })}\n`,
     );

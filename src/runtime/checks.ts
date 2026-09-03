@@ -70,17 +70,31 @@ export function runCheck(
   defaultTimeoutMs: number,
   env: Record<string, string> = {},
   evidence?: CheckEvidenceOutput,
+  signal?: AbortSignal,
 ): Promise<CheckResult> {
   const started = Date.now();
   const timeoutMs = spec.timeout_ms ?? (spec.timeout_min ? spec.timeout_min * 60_000 : defaultTimeoutMs);
   return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(abortFailure(signal));
+      return;
+    }
     const stdout = new OutputCapture();
     const stderr = new OutputCapture();
     let timedOut = false;
+    let aborted = false;
+    let cancellation: Error | undefined;
     let settled = false;
+    let timer: NodeJS.Timeout | undefined;
+    let child: ReturnType<typeof spawn> | undefined;
+    const cleanup = () => {
+      if (timer) clearTimeout(timer);
+      signal?.removeEventListener("abort", onAbort);
+    };
     const finish = (status: CheckResult["status"], exit_code: number | null) => {
       if (settled) return;
       settled = true;
+      cleanup();
       void (async () => {
         const stdoutResult = stdout.finish();
         const stderrResult = stderr.finish();
@@ -103,7 +117,18 @@ export function runCheck(
         });
       })().catch(reject);
     };
-    let child;
+    const failCancellation = () => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      reject(cancellation ?? abortFailure(signal));
+    };
+    function onAbort(): void {
+      if (settled || timedOut || aborted) return;
+      aborted = true;
+      cancellation = abortFailure(signal);
+      if (child) killProcessGroup(child);
+    }
     try {
       child = spawn("sh", ["-c", spec.command], { cwd, stdio: ["ignore", "pipe", "pipe"], detached: true, env: { ...process.env, ...env } });
     } catch (err) {
@@ -111,32 +136,40 @@ export function runCheck(
       finish("error", null);
       return;
     }
-    const timer = setTimeout(() => {
+    signal?.addEventListener("abort", onAbort, { once: true });
+    if (signal?.aborted) onAbort();
+    timer = setTimeout(() => {
       timedOut = true;
-      try {
-        process.kill(-child.pid!, "SIGKILL");
-      } catch {
-        child.kill("SIGKILL");
-      }
+      killProcessGroup(child!);
     }, timeoutMs);
-    child.stdout.on("data", (data: Buffer) => stdout.add(data));
-    child.stderr.on("data", (data: Buffer) => stderr.add(data));
+    child.stdout!.on("data", (data: Buffer) => stdout.add(data));
+    child.stderr!.on("data", (data: Buffer) => stderr.add(data));
     child.on("error", (err) => {
-      clearTimeout(timer);
+      if (aborted) {
+        failCancellation();
+        return;
+      }
       stderr.add(String(err));
       finish("error", null);
     });
     child.on("close", (code) => {
-      clearTimeout(timer);
-      if (timedOut) finish("timeout", code);
+      if (aborted) failCancellation();
+      else if (timedOut) finish("timeout", code);
       else finish(code === 0 ? "pass" : "fail", code);
     });
   });
 }
 
-export async function runChecks(specs: CheckSpec[], cwd: string, defaultTimeoutMs = 10 * 60_000, env: Record<string, string> = {}): Promise<CheckResult[]> {
+export async function runChecks(
+  specs: CheckSpec[],
+  cwd: string,
+  defaultTimeoutMs = 10 * 60_000,
+  env: Record<string, string> = {},
+  signal?: AbortSignal,
+): Promise<CheckResult[]> {
   const results: CheckResult[] = [];
   for (let index = 0; index < specs.length; index += 1) {
+    signal?.throwIfAborted();
     const spec = specs[index];
     const evidenceDir = env.HOH_EVIDENCE_DIR;
     results.push(
@@ -146,10 +179,32 @@ export async function runChecks(specs: CheckSpec[], cwd: string, defaultTimeoutM
         defaultTimeoutMs,
         env,
         evidenceDir ? { directory: evidenceDir, basename: `${String(index + 1).padStart(2, "0")}-${safeName(spec.name)}` } : undefined,
+        signal,
       ),
     );
   }
   return results;
+}
+
+function killProcessGroup(child: ReturnType<typeof spawn>): void {
+  try {
+    if (child.pid) process.kill(-child.pid, "SIGKILL");
+    else child.kill("SIGKILL");
+  } catch {
+    try {
+      child.kill("SIGKILL");
+    } catch {
+      // The process may have exited between the group and direct kill attempts.
+    }
+  }
+}
+
+function abortFailure(signal: AbortSignal | undefined): Error {
+  const reason = signal?.reason;
+  if (reason instanceof Error) return reason;
+  const error = new Error(reason === undefined ? "operation aborted" : String(reason));
+  error.name = "AbortError";
+  return error;
 }
 
 export function renderChecks(results: CheckResult[]): string {
