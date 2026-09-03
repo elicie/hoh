@@ -5,9 +5,10 @@ import { test } from "node:test";
 import { createDemoMockHarness, MockHarness } from "../harness/mock.js";
 import { commitAll, git, RUNTIME_IDENTITY } from "../runtime/git.js";
 import { runHoh } from "../runtime/loop.js";
-import { combinedPromptInputSha256 } from "../runtime/prompt-snapshot.js";
+import { buildPromptSnapshot, combinedPromptInputSha256 } from "../runtime/prompt-snapshot.js";
+import { REDACTION_MARKER } from "../runtime/redaction.js";
 import { readJson, RunPaths, writeJson } from "../runtime/state.js";
-import type { Role, RolePromptSnapshot } from "../types.js";
+import type { Role, RolePromptSnapshot, StoredPromptFieldMetadata } from "../types.js";
 import { makeWorkspace } from "./helpers.js";
 
 function sha256(value: string): string {
@@ -23,7 +24,23 @@ async function lastTranscriptInvocation(paths: RunPaths, loopIndex: number, role
   return entries.at(-1)!;
 }
 
-test("final role prompt snapshots preserve the exact harness input and hashes", async () => {
+function assertUnredactedStorage(metadata: StoredPromptFieldMetadata, storedPrompt: string): void {
+  assert.equal(metadata.stored_sha256, sha256(storedPrompt));
+  assert.equal(metadata.redacted, false);
+  assert.equal(metadata.replacement_count, 0);
+  assert.deepEqual(
+    metadata.rules.map((rule) => [rule.id, rule.count]),
+    [
+      ["authorization-header", 0],
+      ["json-credential-field", 0],
+      ["url-userinfo", 0],
+      ["url-query-credential", 0],
+      ["explicit-secret-value", 0],
+    ],
+  );
+}
+
+test("final role prompt snapshots use the v2 storage contract and retain exact hashes", async () => {
   const { ws, spec, cleanup } = await makeWorkspace();
   try {
     const result = await runHoh({
@@ -37,7 +54,7 @@ test("final role prompt snapshots preserve the exact harness input and hashes", 
     for (const role of ["planner", "developer", "tester"] as const) {
       const snapshot = (await readJson<RolePromptSnapshot>(paths.promptSnapshot(1, role)))!;
       const invocation = await lastTranscriptInvocation(paths, 1, role);
-      assert.equal(snapshot.schema_version, 1);
+      assert.equal(snapshot.schema_version, 2);
       assert.equal(snapshot.role, role);
       assert.equal(snapshot.loop_index, 1);
       assert.equal(snapshot.final_attempt, 1);
@@ -47,6 +64,8 @@ test("final role prompt snapshots preserve the exact harness input and hashes", 
       assert.equal(snapshot.user_prompt_sha256, sha256(snapshot.user_prompt));
       assert.equal(snapshot.combined_input_sha256, sha256(JSON.stringify([snapshot.system_prompt, snapshot.user_prompt])));
       assert.equal(snapshot.combined_input_sha256, combinedPromptInputSha256(snapshot.system_prompt, snapshot.user_prompt));
+      assertUnredactedStorage(snapshot.system_prompt_storage, snapshot.system_prompt);
+      assertUnredactedStorage(snapshot.user_prompt_storage, snapshot.user_prompt);
       assert.ok(Number.isFinite(Date.parse(snapshot.created_at)));
     }
 
@@ -59,6 +78,71 @@ test("final role prompt snapshots preserve the exact harness input and hashes", 
   } finally {
     await cleanup();
   }
+});
+
+test("builder hashes exact inputs but stores only redacted prompt copies and non-secret metadata", () => {
+  const secretName = "PRIVATE_PROMPT_TOKEN_NAME";
+  const secretValue = "private-prompt-token-value-12345";
+  const contextualSecret = "short";
+  const systemPrompt = `system ${secretValue} ${secretValue}`;
+  const userPrompt = `{"password":"${contextualSecret}"}\nuser ${secretValue}`;
+  const explicitSecrets = Object.freeze({ [secretName]: secretValue });
+
+  const snapshot = buildPromptSnapshot({
+    role: "planner",
+    loopIndex: 3,
+    finalAttempt: 2,
+    systemPrompt,
+    userPrompt,
+    explicitSecrets,
+    createdAt: "2026-09-03T00:00:00.000Z",
+  });
+  const serialized = JSON.stringify(snapshot);
+
+  assert.equal(snapshot.schema_version, 2);
+  assert.equal(snapshot.system_prompt, `system ${REDACTION_MARKER} ${REDACTION_MARKER}`);
+  assert.equal(snapshot.user_prompt, `{"password":"${REDACTION_MARKER}"}\nuser ${REDACTION_MARKER}`);
+  assert.equal(snapshot.system_prompt_sha256, sha256(systemPrompt));
+  assert.equal(snapshot.user_prompt_sha256, sha256(userPrompt));
+  assert.equal(snapshot.combined_input_sha256, combinedPromptInputSha256(systemPrompt, userPrompt));
+  assert.notEqual(
+    snapshot.combined_input_sha256,
+    combinedPromptInputSha256(snapshot.system_prompt, snapshot.user_prompt),
+    "the combined input hash must not be recomputed from storage-redacted strings",
+  );
+  assert.equal(snapshot.system_prompt_storage.stored_sha256, sha256(snapshot.system_prompt));
+  assert.equal(snapshot.user_prompt_storage.stored_sha256, sha256(snapshot.user_prompt));
+  assert.equal(snapshot.system_prompt_storage.redacted, true);
+  assert.equal(snapshot.user_prompt_storage.redacted, true);
+  assert.equal(snapshot.system_prompt_storage.replacement_count, 2);
+  assert.equal(snapshot.user_prompt_storage.replacement_count, 2);
+  assert.equal(
+    snapshot.system_prompt_storage.rules.find((rule) => rule.id === "explicit-secret-value")?.count,
+    2,
+  );
+  assert.equal(
+    snapshot.user_prompt_storage.rules.find((rule) => rule.id === "json-credential-field")?.count,
+    1,
+  );
+  assert.equal(
+    snapshot.user_prompt_storage.rules.find((rule) => rule.id === "explicit-secret-value")?.count,
+    1,
+  );
+  assert.ok(!serialized.includes(secretValue));
+  assert.ok(!serialized.includes(contextualSecret));
+  assert.ok(!serialized.includes(secretName));
+  assert.deepEqual(explicitSecrets, { [secretName]: secretValue });
+
+  const arraySnapshot = buildPromptSnapshot({
+    role: "planner",
+    loopIndex: 3,
+    finalAttempt: 2,
+    systemPrompt,
+    userPrompt,
+    explicitSecrets: [null, secretValue, undefined],
+    createdAt: "2026-09-03T00:00:00.000Z",
+  });
+  assert.deepEqual(arraySnapshot, snapshot);
 });
 
 test("a structured-output retry snapshots the actual final prompt with its runtime notice", async () => {

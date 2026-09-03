@@ -66,6 +66,7 @@ import {
 } from "./prompts.js";
 import { buildPromptSnapshot } from "./prompt-snapshot.js";
 import { assertProtocolReceiptIntegrity, buildProtocolReceipt, hasExplicitProtocol } from "./protocol.js";
+import { configuredProviderSecretValues, redactStorageText, type ExplicitSecretValues } from "./redaction.js";
 import { renderRunReadme, renderTesterReport } from "./report.js";
 import { plannerTools, SUBMIT_EVIDENCE_TOOL, SUBMIT_PLAN_TOOL, testerTools } from "./schemas.js";
 import { lastCompletedLoop, loadLedger, loadRun, pad, readJson, RunPaths, writeJson, writeText } from "./state.js";
@@ -116,6 +117,7 @@ interface Ctx {
   claimCatalog: ClaimCatalog;
   coverage: CoverageState;
   budget: BudgetTracker;
+  storageSecrets: ExplicitSecretValues;
   signal?: AbortSignal;
 }
 
@@ -211,6 +213,7 @@ export async function runHoh(opts: RunOptions): Promise<RunResult> {
     log(`resuming run ${run.run_id}${changed ? " with updated configuration" : ""}`);
   }
   const spec = await readFile(paths.spec, "utf8");
+  const storageSecrets = configuredProviderSecretValues(config);
   const claimState = await ensureClaimState({
     workspace: ws,
     specPath: run.spec_path,
@@ -221,6 +224,7 @@ export async function runHoh(opts: RunOptions): Promise<RunResult> {
     expectedModel: run.protocol_receipt?.mode === "paper" ? run.protocol_receipt.models.planner ?? undefined : undefined,
     timeoutMs: config.timeouts.role_min * 60_000,
     signal: opts.signal,
+    storageSecrets,
   });
   // The optional loop-0 claim-drafting extension predates RoleUsage accounting.
   // The canonical budget boundary deliberately starts at Planner loop 1.
@@ -255,6 +259,7 @@ export async function runHoh(opts: RunOptions): Promise<RunResult> {
     claimCatalog: claimState.catalog,
     coverage: claimState.coverage,
     budget,
+    storageSecrets,
     signal: opts.signal,
   };
   const done = await lastCompletedLoop(paths);
@@ -360,7 +365,7 @@ export async function runLoop(ctx: Ctx, t: number): Promise<LoopResult> {
       log(`${tag} planner: WARNING workspace changed during planning (${plannerChanges.length} paths); reverting`);
       await restorePaths(ws, artifactSpec);
     }
-    await installCapturedTranscript(plannerRun.transcript);
+    await installCapturedTranscript(plannerRun.transcript, ctx.storageSecrets);
     await writeJson(
       paths.promptSnapshot(t, "planner"),
       buildPromptSnapshot({
@@ -369,6 +374,7 @@ export async function runLoop(ctx: Ctx, t: number): Promise<LoopResult> {
         finalAttempt: plannerRun.attempts,
         systemPrompt: plannerPrompts.system,
         userPrompt: plannerRun.finalUserPrompt,
+        explicitSecrets: ctx.storageSecrets,
       }),
     );
     if (!validated) {
@@ -449,7 +455,7 @@ export async function runLoop(ctx: Ctx, t: number): Promise<LoopResult> {
       await restorePaths(ws, hohChanges.map((p) => `:(literal)${p}`));
       log(`${tag} developer: WARNING reverted ${hohChanges.length} change(s) under .hoh/`);
     }
-    await installCapturedTranscript(developerRun.transcript);
+    await installCapturedTranscript(developerRun.transcript, ctx.storageSecrets);
     // The harness writes the current transcript while the Developer runs, and
     // a shell-enabled Developer can stage it (or any other runtime record).
     // Keep all .hoh entries out of the candidate index; the runtime commits its
@@ -483,6 +489,7 @@ export async function runLoop(ctx: Ctx, t: number): Promise<LoopResult> {
         finalAttempt: developerRun.attempts,
         systemPrompt: developerPrompts.system,
         userPrompt: developerRun.finalUserPrompt,
+        explicitSecrets: ctx.storageSecrets,
       }),
     );
     log(`${tag} developer: done — candidate ${newCandidateId}, ${developer.changed_paths.length} path(s) changed${commit ? "" : " (no commit)"}`);
@@ -621,7 +628,7 @@ export async function runLoop(ctx: Ctx, t: number): Promise<LoopResult> {
         );
       }
       const testerViolations = [...testerWorkspaceChanges, ...testerRuntimeChanges];
-      await installCapturedTranscript(testerRun.transcript);
+      await installCapturedTranscript(testerRun.transcript, ctx.storageSecrets);
       await writeJson(
         paths.promptSnapshot(t, "tester"),
         buildPromptSnapshot({
@@ -630,6 +637,7 @@ export async function runLoop(ctx: Ctx, t: number): Promise<LoopResult> {
           finalAttempt: testerRun.attempts,
           systemPrompt: testerPrompts.system,
           userPrompt: testerRun.finalUserPrompt,
+          explicitSecrets: ctx.storageSecrets,
         }),
       );
       const submission =
@@ -712,7 +720,7 @@ export async function runLoop(ctx: Ctx, t: number): Promise<LoopResult> {
     }
     const failedCapture = failedTranscriptCapture(err);
     if (failedCapture) {
-      await restoreFailedRoleRuntimeWrites(ws, paths, t, process.env.HOH_ROLE, failedCapture);
+      await restoreFailedRoleRuntimeWrites(ws, paths, t, process.env.HOH_ROLE, failedCapture, ctx.storageSecrets);
       await ctx.budget.persist();
     }
     // A failed shell-enabled role may have staged arbitrary workspace paths.
@@ -865,11 +873,11 @@ async function beginTranscriptCapture(finalPath: string | undefined): Promise<Tr
   return { finalPath, content };
 }
 
-async function installCapturedTranscript(capture: TranscriptCapture | null): Promise<void> {
+async function installCapturedTranscript(capture: TranscriptCapture | null, storageSecrets: ExplicitSecretValues): Promise<void> {
   if (!capture) return;
   await mkdir(path.dirname(capture.finalPath), { recursive: true });
   await rm(capture.finalPath, { force: true });
-  if (capture.content) await writeFile(capture.finalPath, capture.content);
+  if (capture.content) await writeFile(capture.finalPath, redactStorageText(capture.content, storageSecrets).stored_text);
 }
 
 function failedTranscriptCapture(error: unknown): TranscriptCapture | null {
@@ -883,6 +891,7 @@ async function restoreFailedRoleRuntimeWrites(
   loopIndex: number,
   role: string | undefined,
   capture: TranscriptCapture,
+  storageSecrets: ExplicitSecretValues,
 ): Promise<void> {
   if (role === "planner" || role === "tester") {
     const workspaceChanges = await pathsChanged(workspace, [".", ":(exclude).hoh"]);
@@ -901,7 +910,7 @@ async function restoreFailedRoleRuntimeWrites(
       { includeIgnored: true },
     );
   }
-  await installCapturedTranscript(capture);
+  await installCapturedTranscript(capture, storageSecrets);
 }
 
 function lastSubmission<T>(result: RoleResult, tool: string): T | null {

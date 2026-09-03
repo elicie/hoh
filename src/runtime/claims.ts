@@ -5,6 +5,7 @@ import { READ_ONLY_TOOLS } from "../harness/types.js";
 import type { ClaimCatalog, CoverageState } from "../types.js";
 import { emptyCoverage, loadClaimCatalog, makeClaimCatalog, rebuildCoverage } from "./coverage.js";
 import { renderClaimDraftPrompts } from "./prompts.js";
+import { redactStorageText, type ExplicitSecretValues } from "./redaction.js";
 import { claimsTools, SUBMIT_CLAIMS_TOOL } from "./schemas.js";
 import { readJson, type RunPaths, writeJson } from "./state.js";
 
@@ -19,6 +20,8 @@ export interface ClaimGenerationOptions {
   expectedModel?: string;
   timeoutMs?: number;
   signal?: AbortSignal;
+  /** Explicit provider credential values removed from persisted transcripts. */
+  storageSecrets?: ExplicitSecretValues;
 }
 
 export interface ClaimState {
@@ -56,7 +59,7 @@ export async function generateClaimCatalog(options: ClaimGenerationOptions): Pro
       .finally(async () => {
         if (!transcript) return;
         await mkdir(options.paths.root, { recursive: true });
-        await appendFile(options.paths.claimsTranscript, transcript);
+        await appendFile(options.paths.claimsTranscript, redactStorageText(transcript, options.storageSecrets).stored_text);
       });
     options.signal?.throwIfAborted();
     if (options.expectedModel && result.model !== options.expectedModel) {

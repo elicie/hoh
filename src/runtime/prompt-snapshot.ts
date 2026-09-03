@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
-import type { Role, RolePromptSnapshot } from "../types.js";
+import type { Role, RolePromptSnapshot, StoredPromptFieldMetadata } from "../types.js";
+import { redactStorageText, type ExplicitSecretValues, type StorageRedactionResult } from "./redaction.js";
 
 export function promptSha256(prompt: string): string {
   return createHash("sha256").update(prompt, "utf8").digest("hex");
@@ -16,18 +17,34 @@ export function buildPromptSnapshot(input: {
   finalAttempt: number;
   systemPrompt: string;
   userPrompt: string;
+  /** Values are filtered by the storage redactor; record labels are never persisted. */
+  explicitSecrets?: ExplicitSecretValues;
   createdAt?: string;
 }): RolePromptSnapshot {
+  const systemStorage = redactStorageText(input.systemPrompt, input.explicitSecrets);
+  const userStorage = redactStorageText(input.userPrompt, input.explicitSecrets);
+
   return {
-    schema_version: 1,
+    schema_version: 2,
     role: input.role,
     loop_index: input.loopIndex,
     final_attempt: input.finalAttempt,
-    system_prompt: input.systemPrompt,
-    user_prompt: input.userPrompt,
+    system_prompt: systemStorage.stored_text,
+    user_prompt: userStorage.stored_text,
     system_prompt_sha256: promptSha256(input.systemPrompt),
     user_prompt_sha256: promptSha256(input.userPrompt),
     combined_input_sha256: combinedPromptInputSha256(input.systemPrompt, input.userPrompt),
+    system_prompt_storage: storageMetadata(systemStorage),
+    user_prompt_storage: storageMetadata(userStorage),
     created_at: input.createdAt ?? new Date().toISOString(),
+  };
+}
+
+function storageMetadata(redaction: StorageRedactionResult): StoredPromptFieldMetadata {
+  return {
+    stored_sha256: redaction.stored_sha256,
+    redacted: redaction.redacted,
+    replacement_count: redaction.replacement_count,
+    rules: redaction.rules,
   };
 }

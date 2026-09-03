@@ -62,7 +62,8 @@ of pretending that Codex exposes pi's individual built-in tool names.
   attempts to change other workspace or runtime records are reverted and fail QA.
   Active role transcript events are buffered inside the harness process and
   installed only after the corresponding mutation guard, so role-visible file
-  writes cannot forge the runtime's log.
+  writes cannot forge the runtime's log. Config-referenced provider credentials
+  and narrow credential syntax are redacted at that storage boundary.
 - **Structured output or nothing.** Planner and Tester deliver through tools
   with TypeBox schemas. A missing call is retried once with a runtime notice;
   a Planner that still returns nothing aborts the loop, a Tester that still
@@ -131,9 +132,13 @@ of pretending that Codex exposes pi's individual built-in tool names.
   logs, so regenerated runtime files are not attributed to the next role.
 - **Prompt snapshots.** The exact final system and user input delivered to each
   Planner, Developer, and Tester invocation in loops `1..T`, including the last
-  structured-output retry notice, is stored under the loop's `prompts/`
-  directory with per-input and combined SHA-256 values. The optional loop-0
-  claim-drafting call keeps its existing `claims-transcript.jsonl` record.
+  structured-output retry notice, is hashed in memory. The `prompts/` directory
+  stores redacted copies plus original-input hashes, stored-copy hashes, and
+  fixed-rule replacement counts. The optional loop-0 claim-drafting transcript
+  uses the same storage redaction boundary. These unkeyed SHA-256 values are
+  reproducibility checksums, not confidentiality or authenticity controls;
+  known templates and low-entropy values may still be guessable, so `.hoh`
+  records remain sensitive and are not automatically safe to publish.
 - **Explicit pi resources.** Pi extensions and skills are disabled by default.
   Workspace-relative paths may be enabled globally or per role; extension tools
   are active only when named in that role's allowlist. Real paths and recursive
@@ -175,7 +180,7 @@ iterations/loop-NN/
   checks.json               deterministic check results on the frozen candidate
   evidence.json             E_t
   evidence/                 hashed QA artifacts and retained check output
-  prompts/<role>.json       exact final system/user prompt snapshot and hashes
+  prompts/<role>.json       redacted prompt copies, exact-input hashes, storage metadata
   tester_report.md          human-readable QA report
   transcripts/<role>.jsonl  adapter session events (or mock records)
   error.json                present only when the loop aborted
@@ -332,9 +337,12 @@ Provider configuration records environment-variable references rather than
 literal keys: `.env` files in the current directory and workspace are loaded
 automatically (this repo's `.env` is git-ignored), and `.hoh/pi-models.json`
 keeps `$ENV` references. Shell-enabled roles, setup commands, and checks still
-inherit the runtime environment, so they can read or print those values. Use
-scoped credentials and trusted specifications/tooling; HoH is not an
-environment-variable sandbox.
+inherit the runtime environment, so they can read or print those values. Before
+prompt or transcript persistence, HoH removes values referenced by configured
+provider keys and credential headers; it does not scan unrelated environment
+variables or execute `!command` helpers merely for redaction. Use scoped
+credentials and trusted specifications/tooling; HoH is not an environment-variable
+sandbox.
 `hoh config` re-runs discovery and prints the model list; when the endpoint is
 unreachable, the previously discovered list is reused.
 Every role record stores the model that was actually used, so `.hoh/README.md`
@@ -416,8 +424,11 @@ npm test
 - `prompts.test.ts`: UTF-8 disclosure budgets, priority indexes, role-specific
   context projection, canonical paths, oversized-body omission, and the bounded
   Developer prompt's byte/token-estimate reduction against an unbounded fixture.
-- `prompt-snapshot.test.ts`: exact final prompt hashes, retry capture, resume
-  behavior, candidate exclusion, and external-evaluator metadata non-mixing.
+- `prompt-snapshot.test.ts`: exact pre-redaction prompt hashes, redacted storage
+  metadata, retry capture, resume behavior, candidate exclusion, and
+  external-evaluator metadata non-mixing.
+- `storage-redaction-integration.test.ts`: exact in-memory role inputs while
+  configured credentials are absent from prompt and transcript storage.
 - `evidence-files.test.ts`: durable Tester files, check output, SHA-256 binding,
   git inclusion, path boundaries, size limits, and runtime-record protection.
 - `pi-fake.test.ts`: the real pi SDK session and tool loop driven by a fake

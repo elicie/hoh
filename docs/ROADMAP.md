@@ -240,14 +240,13 @@ OpenCode 계열 두 번째 어댑터는 Codex로 18번 end-to-end experiment man
 
 ## 15. 입력 receipt와 무결성 검증 — 부분 완료
 
-현재 candidate/spec/catalog/evidence 계열 해시, protocol/config/role-contract receipt, 역할별 최종 prompt snapshot과 입력 해시가 기록되고, protocol receipt는 resume 시 자체 해시를 검산한다. 다음을 하나의 run receipt와 독립 검증 명령으로 완성한다.
+현재 candidate/spec/catalog/evidence 계열 해시, protocol/config/role-contract receipt, 역할별 최종 prompt snapshot과 입력 해시가 기록되고, protocol receipt는 resume 시 자체 해시를 검산한다. exact prompt는 메모리에서 먼저 해시하고, 저장 snapshot과 역할·claim transcript에는 설정에서 참조한 credential 값과 좁은 credential 문맥의 redaction을 적용한다. snapshot은 원문 입력 해시, 저장본 해시, redaction 여부와 고정 규칙별 교체 수를 구분해 기록한다. 원문 SHA-256은 재현성 checksum일 뿐 비밀화나 인증 수단이 아니므로 `.hoh` 기록은 계속 민감 자료로 취급한다. 남은 범위는 다음을 하나의 run receipt와 독립 검증 명령으로 묶는 것이다.
 
 - 역할별 prompt snapshot hash를 candidate·plan·evidence와 연결한 receipt
 - spec, development plan, config, protocol, candidate tree 해시
 - 역할별 resolved harness/model/reasoning/tool policy
 - evidence 파일 해시와 claim 연결
 - `hoh verify --workspace`의 불일치 보고
-- exact prompt는 메모리에서 해시하고, 저장 snapshot에는 credential·secret redaction을 적용해 redaction 여부를 기록
 
 receipt는 비밀 값 자체를 저장하지 않고, 재현에 필요한 공개 설정과 해시만 보존한다.
 

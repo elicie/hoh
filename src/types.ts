@@ -317,17 +317,35 @@ export interface BudgetLedger {
   updated_at: string;
 }
 
-/** Exact final role input delivered to the harness for one loop. */
+export interface StoredPromptFieldMetadata {
+  /** SHA-256 of the UTF-8 encoding of the stored, potentially redacted field. */
+  stored_sha256: string;
+  /** True only when the storage redactor replaced content in this field. */
+  redacted: boolean;
+  /** Number of replacements performed in this field, not a count of unique secrets. */
+  replacement_count: number;
+  /** Fixed non-secret rule identifiers and their replacement counts. */
+  rules: readonly import("./runtime/redaction.js").RedactionRuleCount[];
+}
+
+/** Stored final role input for one loop; pre-redaction input is omitted and checksummed below. */
 export interface RolePromptSnapshot {
-  schema_version: 1;
+  schema_version: 2;
   role: Role;
   loop_index: number;
   final_attempt: number;
+  /** Potentially redacted storage copy; it is not necessarily the exact harness input. */
   system_prompt: string;
+  /** Potentially redacted storage copy; it is not necessarily the exact harness input. */
   user_prompt: string;
+  /** SHA-256 of Node's UTF-8 encoding of the pre-redaction system prompt. */
   system_prompt_sha256: string;
+  /** SHA-256 of Node's UTF-8 encoding of the pre-redaction user prompt. */
   user_prompt_sha256: string;
+  /** SHA-256 checksum of the JSON tuple built from both pre-redaction prompt strings. */
   combined_input_sha256: string;
+  system_prompt_storage: StoredPromptFieldMetadata;
+  user_prompt_storage: StoredPromptFieldMetadata;
   created_at: string;
 }
 
