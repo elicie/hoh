@@ -11,6 +11,7 @@ import { canonicalSha256 } from "../runtime/protocol.js";
 
 const RUBRIC_SHA = "a".repeat(64);
 const RUN_SHA = "b".repeat(64);
+const EXECUTABLE_SHA = "c".repeat(64);
 
 function plan(): ExperimentPlan {
   return {
@@ -32,6 +33,7 @@ function plan(): ExperimentPlan {
       argv: ["/opt/benchmark/evaluate", "--format", "json"],
       version: "benchmark-evaluator@1.2.3",
       rubric_sha256: RUBRIC_SHA,
+      executable_sha256: EXECUTABLE_SHA,
     },
     metric: "task_success_rate",
     aggregation: "macro_mean",
@@ -110,7 +112,9 @@ test("experiment manifest: plan validation fixes conditions, argv, hashes, repet
     { mutate: (value) => (value.budget.limit = 1.5), error: /positive safe integer for wall_clock_ms/ },
     { mutate: (value) => (value.evaluator.argv = []), error: /plan\.evaluator\.argv must be a non-empty argv array/ },
     { mutate: (value) => (value.evaluator.argv = "evaluate --json"), error: /plan\.evaluator\.argv must be a non-empty argv array/ },
+    { mutate: (value) => (value.evaluator.argv[0] = "evaluate"), error: /plan\.evaluator\.argv\[0\] must be an absolute executable path/ },
     { mutate: (value) => (value.evaluator.rubric_sha256 = "ABC"), error: /rubric_sha256 must be a lowercase 64-character/ },
+    { mutate: (value) => (value.evaluator.executable_sha256 = "ABC"), error: /executable_sha256 must be a lowercase 64-character/ },
     { mutate: (value) => value.cells.pop(), error: /must contain exactly one cell for each condition/ },
     { mutate: (value) => (value.cells[4].condition = "hoh"), error: /duplicates condition "hoh"/ },
   ];

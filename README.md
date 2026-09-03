@@ -41,6 +41,14 @@ of pretending that Codex exposes pi's individual built-in tool names.
   `protocol: "extended"` keeps product-specific role-model and budget overrides.
   Configs without the field are treated as legacy `extended` runs, never
   retroactively labeled paper-compatible.
+- **Pre-registered experiment boundary (foundation).** An immutable experiment
+  plan fixes all five comparison conditions, common budget, samples, repeats,
+  evaluator executable/version/rubric hashes, analysis, exclusions, and retry
+  rules before outcomes append. The blind evaluator receives only neutralized
+  task/sample/artifact input in a separate process with bounded output and no
+  inherited parent environment. It assumes trusted cooperative evaluator code;
+  it is explicitly not a filesystem or network sandbox. Condition runners and
+  result aggregation remain to be connected.
 - **Candidate identity.** After the Developer finishes, the runtime commits the
   workspace and hashes only the configured `artifact_dir` subtree, respecting
   Git ignore rules. `artifact_dir: "."` means the whole workspace except
@@ -413,6 +421,11 @@ npm test
 - `codex-harness.test.ts`: exact non-interactive CLI flags, schema mapping,
   process-group cancellation, adapter versioning, native role-policy receipts,
   config validation, and a complete paper-protocol loop through a fake CLI.
+- `experiment-manifest.test.ts`: immutable five-condition plans, common budgets,
+  evaluator identity, append-only outcomes, retry lineage, and validity rules.
+- `experiment-evaluator.test.ts`: neutralized serialized input, exact argv and
+  executable hashes, bounded finite-JSON output, environment blinding, and
+  process-group cancellation under the trusted-evaluator threat model.
 - `ledger.test.ts`: exact gap identity, duplicate and replay idempotence,
   adjacent-loop escalation, and open/closed/regressed transitions.
 - `config.test.ts`: config merge and validation, paper/extended protocol

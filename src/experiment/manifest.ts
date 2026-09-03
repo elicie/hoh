@@ -1,4 +1,5 @@
 /** Pre-registered experiment plan and append-only attempt outcomes. */
+import path from "node:path";
 import { canonicalSha256 } from "../runtime/protocol.js";
 
 export const EXPERIMENT_CONDITIONS = ["hoh", "vanilla", "no-plan-update", "no-evidence", "no-warm-start"] as const;
@@ -26,6 +27,8 @@ export interface ExperimentEvaluator {
   readonly argv: readonly string[];
   readonly version: string;
   readonly rubric_sha256: string;
+  /** Exact executable bytes expected immediately before and after the trusted evaluator run. */
+  readonly executable_sha256: string;
 }
 
 export interface ExperimentRetryRules {
@@ -223,10 +226,16 @@ function parseBudget(value: unknown, at: string): ExperimentBudget {
 
 function parseEvaluator(value: unknown, at: string): ExperimentEvaluator {
   const raw = record(value, at);
-  exactKeys(raw, ["argv", "version", "rubric_sha256"], at);
+  exactKeys(raw, ["argv", "version", "rubric_sha256", "executable_sha256"], at);
   if (!Array.isArray(raw.argv) || raw.argv.length === 0) fail(`${at}.argv`, "must be a non-empty argv array");
   const argv = raw.argv.map((argument, index) => argumentText(argument, `${at}.argv[${index}]`));
-  return { argv, version: text(raw.version, `${at}.version`), rubric_sha256: sha256(raw.rubric_sha256, `${at}.rubric_sha256`) };
+  if (!path.isAbsolute(argv[0])) fail(`${at}.argv[0]`, "must be an absolute executable path");
+  return {
+    argv,
+    version: text(raw.version, `${at}.version`),
+    rubric_sha256: sha256(raw.rubric_sha256, `${at}.rubric_sha256`),
+    executable_sha256: sha256(raw.executable_sha256, `${at}.executable_sha256`),
+  };
 }
 
 function parseRetryRules(value: unknown, at: string): ExperimentRetryRules {

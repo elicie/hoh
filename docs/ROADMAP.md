@@ -57,7 +57,7 @@
 | 15 | 입력 receipt와 무결성 검증 | Full | 부분 완료 | P2 | 0.5일 | 3, 4 |
 | 16 | 실행 리포트 확장 | Ops | 부분 완료 | P2 | 1일 | 3, 15 |
 | 17 | 프로젝트 유형별 검증 키트 | Extension | 부분 완료 | P3 | 0.5일/개 | – |
-| 18 | 대조군·ablation·외부 평가 프로토콜 | Experiment | 대기 | P2 | 1~2일 | 4, 14, 15 |
+| 18 | 대조군·ablation·외부 평가 프로토콜 | Experiment | 부분 완료 | P2 | 1~2일 | 4, 14, 15 |
 
 ---
 
@@ -265,18 +265,25 @@ receipt는 비밀 값 자체를 저장하지 않고, 재현에 필요한 공개 
 
 `examples/1945` 웹 게임 예제가 첫 검증 키트 역할을 한다. 다음 키트는 실제 프로젝트가 생길 때 `PRD + config + tools + checks`의 최소 묶음으로 추가한다. Node, Python, 웹 앱용 범용 플랫폼을 미리 만들지 않는다. 각 키트는 프로젝트 고유 도구가 저장소 밖 경로나 임시 상태에 의존하지 않는지 검증한다.
 
-## 18. 대조군·ablation·외부 평가 프로토콜 — 대기
+## 18. 대조군·ablation·외부 평가 프로토콜 — 부분 완료
 
 논문과 같은 성능 주장을 하려면 런타임 기능보다 먼저 실험 격리를 보장해야 한다.
 
-필요 항목:
+완료된 기반:
+
+- 다섯 조건(`hoh`, `vanilla`, `no-plan-update`, `no-evidence`, `no-warm-start`), 공통 예산, 표본·반복·seed, evaluator argv/version/rubric/executable SHA-256, metric·집계·불확실성·제외·재시도 규칙을 결과 생성 전에 고정하는 immutable experiment manifest
+- plan hash를 유지한 append-only attempt 결과와 retry lineage, run receipt 참조, 유효/무효 판정 검증
+- 중립 임시 경로와 `artifact.bin`, 고정 argv, 최소 공개 환경만 전달하고 task/sample/artifact 이외의 run label·중간 점수를 직렬화하지 않는 별도 evaluator 프로세스
+- evaluator 실행파일을 실행 전후 SHA-256으로 확인하고 stdout/stderr 한도, 단일 finite JSON, timeout·취소 process-group 종료, 결과 receipt를 기록하는 blind evaluator 코어
+
+이 경계는 신뢰된 cooperative evaluator를 위한 입력 blinding이다. 같은 사용자 권한의 악성 evaluator를 막는 filesystem/network sandbox가 아니며 receipt에도 그 한계를 명시한다.
+
+남은 항목:
 
 - 동일 하네스·모델·스펙·예산의 Vanilla 연속 개발 대조군
 - `no-plan-update`, `no-evidence`, `no-warm-start` ablation
 - artifact 생성 전에 버전이 고정된 공식 benchmark evaluator 또는 독립 human rubric
-- scorer를 세 역할과 별도 프로세스로 실행하고, evaluator 입력에서 run label과 개발 중간 점수를 가리는 격리
-- seed, protocol receipt, 실패·재시도, 유효/무효 run 판정이 포함된 experiment manifest
-- 실행 전에 표본, 반복 횟수, 집계 방식, 불확실성 보고법을 고정한 분석 계획
+- 각 condition 실행 결과와 protocol/run/evaluator receipt를 manifest attempt에 연결하는 orchestration
 - 원시 결과와 집계 스크립트 보존
 
 외부 ground truth가 없는 자체 QA PASS를 벤치마크 점수로 사용하지 않는다. 이 프로토콜과 evaluator 독립성이 완성되기 전에는 논문 대비 성능 향상 수치를 주장하지 않는다.
