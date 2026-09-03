@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   MIN_EXPLICIT_SECRET_CODE_POINTS,
   REDACTION_MARKER,
+  configuredProviderSecretValues,
   redactStorageText,
   type RedactionRuleId,
 } from "../runtime/redaction.js";
@@ -113,4 +114,41 @@ test("redacting an already-redacted string is idempotent", () => {
   assert.equal(second.redacted, false);
   assert.equal(second.replacement_count, 0);
   assert.deepEqual(second.rules.map((rule) => rule.count), [0, 0, 0, 0, 0]);
+});
+
+test("explicit secrets are removed from JSON-escaped and URL-encoded storage forms", () => {
+  const secret = 'line one\n"line/two"';
+  const jsonEscaped = JSON.stringify(secret).slice(1, -1);
+  const urlEncoded = encodeURIComponent(secret);
+  const result = redactStorageText(`raw=${secret}\njson=${jsonEscaped}\nurl=${urlEncoded}`, [secret]);
+
+  assert.equal(result.stored_text, `raw=${REDACTION_MARKER}\njson=${REDACTION_MARKER}\nurl=${REDACTION_MARKER}`);
+  assert.equal(countFor(result, "explicit-secret-value"), 3);
+});
+
+test("configured provider secrets resolve referenced values without scanning env or running commands", () => {
+  const configured = "configured-value-12345";
+  const header = "header-value-12345";
+  const unrelated = "unrelated-value-12345";
+  const values = configuredProviderSecretValues(
+    {
+      providers: {
+        local: {
+          base_url: "http://localhost:11434/v1",
+          api_key: "$CONFIGURED_KEY",
+          headers: {
+            "X-Access-Token": "Bearer ${HEADER_TOKEN}",
+            "X-Trace": "public-trace-value",
+            "X-Command-Secret": "!credential-helper",
+          },
+          models: ["test"],
+        },
+      },
+    },
+    { CONFIGURED_KEY: configured, HEADER_TOKEN: header, UNRELATED_KEY: unrelated },
+  );
+
+  assert.deepEqual(values, [configured, header]);
+  const redacted = redactStorageText(`${configured}|${header}|${unrelated}|public-trace-value`, values);
+  assert.equal(redacted.stored_text, `${REDACTION_MARKER}|${REDACTION_MARKER}|${unrelated}|public-trace-value`);
 });

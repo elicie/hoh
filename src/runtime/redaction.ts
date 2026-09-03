@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import type { HohConfig } from "./config.js";
 
 export const REDACTION_MARKER = "[REDACTED]";
 
@@ -30,6 +31,7 @@ export interface StorageRedactionResult {
 }
 
 export type NamedSecretValues = Readonly<Record<string, string | null | undefined>>;
+export type ExplicitSecretValues = NamedSecretValues | readonly (string | null | undefined)[];
 
 const RULE_IDS = [
   "authorization-header",
@@ -82,7 +84,7 @@ const TRAILING_PROSE_PUNCTUATION = /[)\]},.;]+$/;
  * non-secret rule vocabulary. A zero count means only that these narrow rules
  * made no replacement; it is not proof that arbitrary input contains no secret.
  */
-export function redactStorageText(content: string, explicitSecrets: NamedSecretValues = {}): StorageRedactionResult {
+export function redactStorageText(content: string, explicitSecrets: ExplicitSecretValues = {}): StorageRedactionResult {
   const counts = new Map<RedactionRuleId, number>(RULE_IDS.map((id) => [id, 0]));
   let stored = content;
 
@@ -163,19 +165,68 @@ function shouldReplaceContextualValue(value: string): boolean {
   return value.length > 0 && value !== REDACTION_MARKER;
 }
 
-function normalizedExplicitSecrets(explicitSecrets: NamedSecretValues): string[] {
+/**
+ * Resolve only provider credentials explicitly referenced by the committed
+ * config. This deliberately does not scan the ambient environment or execute
+ * `!command` credential providers merely for redaction.
+ */
+export function configuredProviderSecretValues(
+  config: Pick<HohConfig, "providers">,
+  environment: Readonly<Record<string, string | undefined>> = process.env,
+): readonly string[] {
   const values = new Set<string>();
+  for (const provider of Object.values(config.providers)) {
+    collectConfiguredSecret(provider.api_key, true, environment, values);
+    for (const [name, value] of Object.entries(provider.headers ?? {})) {
+      collectConfiguredSecret(value, isCredentialHeader(name), environment, values);
+    }
+  }
+  return Object.freeze([...values].sort());
+}
 
-  for (const value of Object.values(explicitSecrets)) {
+function collectConfiguredSecret(
+  configured: string | undefined,
+  literalIsSecret: boolean,
+  environment: Readonly<Record<string, string | undefined>>,
+  values: Set<string>,
+): void {
+  if (!configured || configured.startsWith("!")) return;
+  const references = [...configured.matchAll(/\$\{([A-Za-z_][A-Za-z0-9_]*)\}|\$([A-Za-z_][A-Za-z0-9_]*)/g)];
+  if (references.length > 0) {
+    for (const match of references) {
+      const value = environment[match[1] ?? match[2]];
+      if (value) values.add(value);
+    }
+    return;
+  }
+  if (literalIsSecret) values.add(configured);
+}
+
+function isCredentialHeader(name: string): boolean {
+  return /(?:authorization|api[-_]?key|token|secret|credential|password)/i.test(name);
+}
+
+function normalizedExplicitSecrets(explicitSecrets: ExplicitSecretValues): string[] {
+  const originals = new Set<string>();
+  const sourceValues = Array.isArray(explicitSecrets) ? explicitSecrets : Object.values(explicitSecrets);
+
+  for (const value of sourceValues) {
     if (typeof value !== "string") continue;
     const normalizedForSafety = value.trim().toLowerCase();
     if (Array.from(value).length < MIN_EXPLICIT_SECRET_CODE_POINTS) continue;
     if (!normalizedForSafety || COMMON_EXPLICIT_VALUES.has(normalizedForSafety)) continue;
     if (REDACTION_MARKER.includes(value)) continue;
-    values.add(value);
+    originals.add(value);
   }
 
-  return [...values].sort((left, right) => {
+  const values = new Set<string>();
+  for (const value of originals) {
+    values.add(value);
+    values.add(JSON.stringify(value).slice(1, -1));
+    values.add(encodeURIComponent(value));
+  }
+
+  return [...values].filter(Boolean).sort((left, right) => {
     const lengthDifference = Array.from(right).length - Array.from(left).length;
     if (lengthDifference !== 0) return lengthDifference;
     return left < right ? -1 : left > right ? 1 : 0;
