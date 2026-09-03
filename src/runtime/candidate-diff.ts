@@ -1,10 +1,11 @@
 /** A deterministic, artifact-scoped base-vs-candidate diff for the QA prompt. */
 import { Buffer } from "node:buffer";
 import path from "node:path";
+import { MAX_INLINE_CANDIDATE_DIFF_BYTES } from "./context-policy.js";
 import { git } from "./git.js";
 
 /** Maximum UTF-8 bytes injected inline for the complete candidate diff block. */
-export const MAX_INLINE_CANDIDATE_DIFF_BYTES = 32 * 1024;
+export { MAX_INLINE_CANDIDATE_DIFF_BYTES } from "./context-policy.js";
 
 export interface CandidateDiffBundle {
   baseCommit: string;

@@ -115,7 +115,7 @@
 
 ## 5. 저장소·CI·문서 기준선 — 완료
 
-런타임, PRD coverage, 재현 가능한 검증이 의미 단위 커밋으로 정리돼 있고 CI와 README, 예제가 현재 동작과 맞춰져 있다. 기준일 현재 `npm test` 결과는 74/74 통과다.
+런타임, PRD coverage, 재현 가능한 검증이 의미 단위 커밋으로 정리돼 있고 CI와 README, 예제가 현재 동작과 맞춰져 있다. 기준일 현재 `npm test` 결과는 75/75 통과다.
 
 ## 6. QA에 후보 diff 제공 — 완료
 
@@ -196,11 +196,17 @@ pi의 ambient extensions와 skills는 계속 끈 채, 설정에 명시한 worksp
 - resource 필드가 없던 legacy `paper` receipt는 현재 manifest가 비어 있을 때만 호환한다. 과거에 무시되던 설정이 새 capability로 활성화되면 새 run을 요구한다.
 - tool allowlist는 모델 호출 권한 경계이지 확장 코드 sandbox가 아니다. 확장은 검토된 신뢰 코드로만 취급한다.
 
-## 11. Developer 컨텍스트·토큰 절감 — 대기
+## 11. Developer 컨텍스트·토큰 절감 — 부분 완료
 
-- 큰 파일은 검색 후 부분 읽기를 우선하도록 지침 추가
+완료된 기반:
+
+- Developer는 큰 파일을 통째로 읽기 전에 `grep`·`find`로 대상 경로와 symbol을 찾고 bounded partial read를 우선한다.
+- context exact view, index, candidate diff, 전체 role prompt의 UTF-8 byte 상한을 하나의 runtime policy로 공유한다. 기존 import 경로는 호환을 유지한다.
+- 경계값의 inclusive 동작과 Developer가 spec, 승인된 development document, 실제 mandatory blocker를 계속 받는지를 자동 테스트한다.
+
+남은 작업:
+
 - 역할별 compaction 설정과 사용량 기록 노출
-- diff와 evidence의 inline 상한을 9번의 disclosure 정책과 공유
 - 최적화 전후의 prompt 크기와 토큰 사용량을 fixture로 비교
 
 비용 절감 때문에 Developer가 스펙, 승인 plan, 열린 blocker를 보지 못하게 해서는 안 된다.

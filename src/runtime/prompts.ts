@@ -10,14 +10,13 @@ import { fileURLToPath } from "node:url";
 import { ROLES, type CheckResult, type ClaimCatalog, type CoverageState, type EvidenceBundle, type Ledger, type PlannerOverlay, type Role } from "../types.js";
 import { renderChecks } from "./checks.js";
 import type { CandidateDiffBundle } from "./candidate-diff.js";
+import { MAX_CONTEXT_INDEX_BYTES, MAX_INLINE_CONTEXT_BYTES, MAX_ROLE_PROMPT_BYTES } from "./context-policy.js";
 import { renderCoveragePriorityIndex, renderCoverageTable } from "./coverage.js";
 import { escalatedIssues, openIssues, renderEscalatedIssues, renderLedger } from "./ledger.js";
 
 const PROMPTS_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "prompts");
 
-export const MAX_ROLE_PROMPT_BYTES = 96 * 1024;
-export const MAX_INLINE_CONTEXT_BYTES = 8 * 1024;
-export const MAX_CONTEXT_INDEX_BYTES = 4 * 1024;
+export { MAX_CONTEXT_INDEX_BYTES, MAX_INLINE_CONTEXT_BYTES, MAX_ROLE_PROMPT_BYTES } from "./context-policy.js";
 
 export function assertRolePromptWithinLimit(role: Role, systemPrompt: string, userPrompt: string): void {
   const bytes = Buffer.byteLength(systemPrompt, "utf8") + Buffer.byteLength(userPrompt, "utf8");

@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import type { CandidateDiffBundle } from "../runtime/candidate-diff.js";
+import { MAX_INLINE_CANDIDATE_DIFF_BYTES, type CandidateDiffBundle } from "../runtime/candidate-diff.js";
+import { CONTEXT_POLICY } from "../runtime/context-policy.js";
 import { emptyCoverage, makeClaimCatalog, renderCoveragePriorityIndex } from "../runtime/coverage.js";
 import { emptyLedger } from "../runtime/ledger.js";
 import {
@@ -9,6 +10,7 @@ import {
   MAX_INLINE_CONTEXT_BYTES,
   MAX_ROLE_PROMPT_BYTES,
   renderContextDisclosure,
+  renderDevelopmentDocument,
   renderDeveloperPrompts,
   renderPlannerPrompts,
   renderTesterPrompts,
@@ -50,6 +52,20 @@ function evidence(summary = "The candidate was exercised."): EvidenceBundle {
   };
 }
 
+test("context policy owns the established disclosure and prompt byte limits", () => {
+  assert.equal(Object.isFrozen(CONTEXT_POLICY), true);
+  assert.deepEqual(CONTEXT_POLICY, {
+    maxInlineContextBytes: 8 * 1024,
+    maxContextIndexBytes: 4 * 1024,
+    maxInlineCandidateDiffBytes: 32 * 1024,
+    maxRolePromptBytes: 96 * 1024,
+  });
+  assert.equal(MAX_INLINE_CONTEXT_BYTES, CONTEXT_POLICY.maxInlineContextBytes);
+  assert.equal(MAX_CONTEXT_INDEX_BYTES, CONTEXT_POLICY.maxContextIndexBytes);
+  assert.equal(MAX_INLINE_CANDIDATE_DIFF_BYTES, CONTEXT_POLICY.maxInlineCandidateDiffBytes);
+  assert.equal(MAX_ROLE_PROMPT_BYTES, CONTEXT_POLICY.maxRolePromptBytes);
+});
+
 test("context disclosure keeps small exact content and omits oversized content", () => {
   const small = "# Small\n\nExact fixture contents.";
   const inline = renderContextDisclosure({ sourcePath: ".hoh/spec.md", content: small, index: "- line 1: # Small" });
@@ -58,8 +74,13 @@ test("context disclosure keeps small exact content and omits oversized content",
   assert.ok(inline.indexOf("Bounded index") < inline.indexOf("BEGIN EXACT VIEW"));
   assert.ok(inline.includes(small));
 
+  const exactLimit = "x".repeat(MAX_INLINE_CONTEXT_BYTES);
+  const inclusive = renderContextDisclosure({ sourcePath: ".hoh/spec.md", content: exactLimit, index: "- exact limit" });
+  assert.match(inclusive, /exact view inline/);
+  assert.ok(inclusive.includes(exactLimit));
+
   const sentinel = "OVERSIZED_PRIVATE_BODY_SENTINEL";
-  const large = `${"x".repeat(MAX_INLINE_CONTEXT_BYTES)}${sentinel}`;
+  const large = `${exactLimit}${sentinel}`;
   const index = "i".repeat(MAX_CONTEXT_INDEX_BYTES * 2);
   const omitted = renderContextDisclosure({ sourcePath: ".hoh/spec.md", content: large, index });
   assert.match(omitted, /index only/);
@@ -145,20 +166,37 @@ test("role prompts expose only their progressive context contract", async () => 
   assert.match(planner.user, /`result_state` \| untested \| check/);
   assert.doesNotMatch(planner.user, /EXTERNAL_EVALUATOR_SENTINEL/);
 
+  const developerSpec = "# Public specification\n\nPUBLIC_SPEC_SENTINEL";
+  const developmentDocument = renderDevelopmentDocument({
+    loopIndex: 2,
+    baseCandidateId: "loop-01-fixture",
+    overlay: {
+      objective: "Repair the mandatory blocker",
+      priorities: [{ name: "Repair", action: "Repair the blocker", observable_outcome: "The blocker is resolved" }],
+      preservation_gate: [],
+      acceptance_gate: ["The blocker has executable evidence"],
+    },
+    previousEvidence: plannerEvidence,
+    ledger,
+    previousChecks: checks,
+  });
   const developer = await renderDeveloperPrompts({
     loopIndex: 2,
     cwd: "/workspace",
     artifactDir: "game",
     specPath: ".hoh/spec.md",
-    spec: DEMO_SPEC,
+    spec: developerSpec,
     devDocPath: ".hoh/iterations/loop-02/development_document.md",
-    developmentDocument: "# Development Document\n\nDEVELOPMENT_DOCUMENT_SENTINEL",
+    developmentDocument,
     baseCandidateId: "loop-01-fixture",
     previousChangedPaths: ["game/main.txt"],
   });
-  assert.match(developer.user, /DEVELOPMENT_DOCUMENT_SENTINEL/);
+  assert.match(developer.system, /large or unfamiliar files.*`grep` and `find`.*bounded partial reads/i);
+  assert.match(developer.user, /PUBLIC_SPEC_SENTINEL/);
+  assert.match(developer.user, /Canonical source: `\.hoh\/iterations\/loop-02\/development_document\.md`/);
+  assert.match(developer.user, /\*\*MANDATORY\*\* `mandatory_from_planner`.*MANDATORY_PLANNER_SENTINEL.*Repair this before discretionary work/);
   assert.match(developer.user, /Paths changed in the previous loop/);
-  assert.doesNotMatch(developer.user, /Deterministic checks on the base candidate/);
+  assert.doesNotMatch(developer.user, /Canonical source: .*checks\.json/, "checks.json is not disclosed as a separate Developer context source");
 
   const tester = await renderTesterPrompts({
     loopIndex: 2,
