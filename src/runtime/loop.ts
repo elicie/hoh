@@ -11,7 +11,7 @@
  * allowlists, isolated worktree, `.hoh/` guard), binds evidence to the tested
  * candidate (tree hash before/after), and records the resulting state.
  */
-import { copyFile, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { copyFile, cp, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { randomBytes } from "node:crypto";
@@ -29,6 +29,7 @@ import type {
   Ledger,
   PlannerOverlay,
   PlannerRecord,
+  ProtocolReceipt,
   QaStatus,
   RoleUsage,
   RunConfig,
@@ -65,7 +66,7 @@ import {
   renderTesterPrompts,
 } from "./prompts.js";
 import { buildPromptSnapshot } from "./prompt-snapshot.js";
-import { assertProtocolReceiptIntegrity, buildProtocolReceipt, hasExplicitProtocol } from "./protocol.js";
+import { assertProtocolReceiptIntegrity, buildProtocolReceipt, canonicalSha256, hasExplicitProtocol } from "./protocol.js";
 import { configuredProviderSecretValues, redactStorageText, type ExplicitSecretValues } from "./redaction.js";
 import { renderRunReadme, renderTesterReport } from "./report.js";
 import { assertSafeRunRecordLayout, refreshRunReceipt, verifyCurrentRunReceipt } from "./run-receipt.js";
@@ -73,6 +74,25 @@ import { plannerTools, SUBMIT_EVIDENCE_TOOL, SUBMIT_PLAN_TOOL, testerTools } fro
 import { lastCompletedLoop, loadLedger, loadRun, pad, readJson, RunPaths, writeJson, writeText } from "./state.js";
 
 export type Logger = (message: string) => void;
+
+export type HohExperimentCondition = "hoh" | "no-plan-update" | "no-evidence" | "no-warm-start";
+
+export interface ExperimentA0Identity {
+  commit_oid: string;
+  /** Full non-.hoh product tree fixed by commit_oid. */
+  workspace_tree_oid: string;
+  /** Configured artifact subtree identity used for candidates and diffs. */
+  tree_oid: string;
+  subdir: string;
+}
+
+/** Opt-in execution semantics installed only by runExperimentCondition. */
+export interface ExperimentLoopPolicy {
+  condition: HohExperimentCondition;
+  a0: ExperimentA0Identity;
+  /** Pre-resolved common contract fixed before any condition role runs. */
+  protocolReceipt: ProtocolReceipt;
+}
 
 export interface RunOptions {
   workspace: string;
@@ -89,6 +109,8 @@ export interface RunOptions {
   log?: Logger;
   /** Cooperative stop signal propagated through role sessions and deterministic checks. */
   signal?: AbortSignal;
+  /** Internal experiment policy. Normal runs must leave this unset. */
+  experimentPolicy?: ExperimentLoopPolicy;
 }
 
 export interface LoopResult {
@@ -119,7 +141,34 @@ interface Ctx {
   coverage: CoverageState;
   budget: BudgetTracker;
   storageSecrets: ExplicitSecretValues;
+  experimentPolicy?: ExperimentLoopPolicy;
   signal?: AbortSignal;
+}
+
+function assertExperimentLoopPolicy(policy: ExperimentLoopPolicy, config: HohConfig, harness: Harness): void {
+  if (!(["hoh", "no-plan-update", "no-evidence", "no-warm-start"] as const).includes(policy.condition)) {
+    throw new Error(`unsupported HoH experiment condition ${JSON.stringify(policy.condition)}`);
+  }
+  if (policy.a0.subdir !== config.artifact_dir) {
+    throw new Error(
+      `experiment A0 subdir ${JSON.stringify(policy.a0.subdir)} does not match artifact_dir ${JSON.stringify(config.artifact_dir)}`,
+    );
+  }
+  if (
+    !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(policy.a0.commit_oid) ||
+    !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(policy.a0.workspace_tree_oid) ||
+    !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(policy.a0.tree_oid)
+  ) {
+    throw new Error("experiment A0 commit/workspace/artifact tree identities must be full lowercase Git object IDs");
+  }
+  assertProtocolReceiptIntegrity(policy.protocolReceipt);
+  if (
+    policy.protocolReceipt.config_sha256 !== canonicalSha256(config) ||
+    policy.protocolReceipt.harness.name !== harness.name ||
+    policy.protocolReceipt.initial_loops !== config.loops
+  ) {
+    throw new Error("experiment protocol receipt does not match the supplied common config/harness contract");
+  }
 }
 
 export async function runHoh(opts: RunOptions): Promise<RunResult> {
@@ -141,12 +190,15 @@ export async function runHoh(opts: RunOptions): Promise<RunResult> {
     throw new Error(`configured harness is "${config.harness}" but a "${opts.harness.name}" harness was supplied`);
   }
   assertValidConfig(config, configSource);
+  if (opts.experimentPolicy) assertExperimentLoopPolicy(opts.experimentPolicy, config, opts.harness);
 
   let run = await loadRun(paths);
   let initialized = false;
   if (!run) {
     if (!opts.specPath) throw new Error("A specification file (--spec) is required to start a new run.");
-    const protocolReceipt = await buildProtocolReceipt(config, opts.harness, { legacyDefault: protocolImplicit, origin: "run_start" });
+    const protocolReceipt =
+      opts.experimentPolicy?.protocolReceipt ??
+      (await buildProtocolReceipt(config, opts.harness, { legacyDefault: protocolImplicit, origin: "run_start" }));
     run = {
       schema_version: 1,
       run_id: `${new Date().toISOString().slice(0, 10).replace(/-/g, "")}-${randomBytes(3).toString("hex")}`,
@@ -285,6 +337,7 @@ export async function runHoh(opts: RunOptions): Promise<RunResult> {
     coverage: claimState.coverage,
     budget,
     storageSecrets,
+    experimentPolicy: opts.experimentPolicy,
     signal: opts.signal,
   };
   const done = await lastCompletedLoop(paths);
@@ -354,11 +407,12 @@ export async function runLoop(ctx: Ctx, t: number): Promise<LoopResult> {
     const previousEvidence = t > 1 ? await readJson<EvidenceBundle>(paths.evidenceJson(t - 1)) : null;
     const previousDeveloper = t > 1 ? await readJson<DeveloperRecord>(paths.developerJson(t - 1)) : null;
     const previousChecks = previousEvidence?.checks ?? null;
-    const baseCommit = await headCommit(ws);
+    const fixedA0 = ctx.experimentPolicy?.condition === "no-warm-start" ? ctx.experimentPolicy.a0 : null;
     // A run may start from a provided artifact (warm start at loop 1): identify it like any other candidate.
     const initialTree = t === 1 ? await artifactTreeHash(ws, { subdir: artifactDir }) : null;
-    const baseCandidateId =
-      previousDeveloper?.candidate_id ?? (initialTree && initialTree !== EMPTY_TREE ? `loop-00-${initialTree.slice(0, 12)}` : null);
+    const baseCandidateId = fixedA0
+      ? `loop-00-${fixedA0.tree_oid.slice(0, 12)}`
+      : previousDeveloper?.candidate_id ?? (initialTree && initialTree !== EMPTY_TREE ? `loop-00-${initialTree.slice(0, 12)}` : null);
 
     process.env.HOH_LOOP = String(t);
 
@@ -366,41 +420,71 @@ export async function runLoop(ctx: Ctx, t: number): Promise<LoopResult> {
     let planner = await readJson<PlannerRecord>(paths.plannerJson(t));
     let developmentDocument = planner ? await readFile(paths.developmentDocument(t), "utf8").catch(() => null) : null;
     let overlay: PlannerOverlay;
-    if (planner && developmentDocument) {
+    if (ctx.experimentPolicy?.condition === "no-plan-update" && t > 1) {
+      const firstPlanner = await readJson<PlannerRecord>(paths.plannerJson(1));
+      const firstDocument = await readFile(paths.developmentDocument(1), "utf8").catch(() => null);
+      if (!firstPlanner || firstDocument === null) {
+        throw new Error("no-plan-update requires the recorded loop-1 development document");
+      }
+      planner = firstPlanner;
+      overlay = firstPlanner;
+      developmentDocument = firstDocument;
+      await copyFile(paths.developmentDocument(1), paths.developmentDocument(t));
+      await commitAll(
+        ws,
+        `chore(loop-${pad(t)}): reuse fixed loop-1 development document`,
+        RUNTIME_IDENTITY,
+        [paths.rel(paths.developmentDocument(t))],
+      );
+      log(`${tag} planner: reusing loop-1 development document (no-plan-update)`);
+    } else if (planner && developmentDocument) {
       overlay = planner;
       log(`${tag} planner: reusing recorded development document (resume)`);
     } else {
     process.env.HOH_ROLE = "planner";
     log(`${tag} planner: start (base ${baseCandidateId ?? "none"})`);
-    const plannerPrompts = await renderPlannerPrompts({
-      loopIndex: t,
-      cwd: ws,
-      artifactDir,
-      specPath: run.spec_path,
-      spec,
-      baseCandidateId,
-      previousEvidence,
-      previousChecks,
-      ledger,
-      claimCatalog: ctx.claimCatalog,
-      coverage: ctx.coverage,
-    });
-    const plannerRun = await invokeRole(
-      ctx,
-      {
-        role: "planner",
+    const omitPlannerEvidence = ctx.experimentPolicy?.condition === "no-evidence";
+    const plannerLedger = omitPlannerEvidence ? emptyLedger() : ledger;
+    const plannerCoverage = omitPlannerEvidence
+      ? { schema_version: 1 as const, claim_catalog_sha256: ctx.coverage.claim_catalog_sha256, claims: {} }
+      : ctx.coverage;
+    const plannerView = omitPlannerEvidence ? await prepareNoEvidencePlannerView(ctx, t) : null;
+    const plannerCwd = plannerView?.cwd ?? ws;
+    let plannerPrompts: Awaited<ReturnType<typeof renderPlannerPrompts>>;
+    let plannerRun: Awaited<ReturnType<typeof invokeRole>>;
+    try {
+      plannerPrompts = await renderPlannerPrompts({
         loopIndex: t,
-        cwd: ws,
-        systemPrompt: plannerPrompts.system,
-        prompt: plannerPrompts.user,
-        tools: READ_ONLY_TOOLS,
-        structuredTools: plannerTools,
-        transcriptPath: paths.transcript(t, "planner"),
-        timeoutMs: roleTimeoutMs,
-        model: modelForRole(config, "planner"),
-      },
-      SUBMIT_PLAN_TOOL,
-    );
+        cwd: plannerCwd,
+        artifactDir,
+        specPath: run.spec_path,
+        spec,
+        baseCandidateId,
+        previousEvidence: omitPlannerEvidence ? null : previousEvidence,
+        previousChecks: omitPlannerEvidence ? null : previousChecks,
+        ledger: plannerLedger,
+        claimCatalog: ctx.claimCatalog,
+        coverage: plannerCoverage,
+      });
+      plannerRun = await invokeRole(
+        ctx,
+        {
+          role: "planner",
+          loopIndex: t,
+          cwd: plannerCwd,
+          systemPrompt: plannerPrompts.system,
+          prompt: plannerPrompts.user,
+          tools: READ_ONLY_TOOLS,
+          structuredTools: plannerTools,
+          transcriptPath: paths.transcript(t, "planner"),
+          timeoutMs: roleTimeoutMs,
+          model: modelForRole(config, "planner"),
+        },
+        SUBMIT_PLAN_TOOL,
+      );
+    } finally {
+      if (plannerView) await plannerView.cleanup();
+    }
     const validated = validateOverlay(lastSubmission<PlannerOverlay>(plannerRun.result, SUBMIT_PLAN_TOOL) ?? parseJsonBlock<PlannerOverlay>(plannerRun.result.finalText));
     // The planner is read-only by tool allowlist; still assert nothing changed.
     const artifactSpec = [".", ":(exclude).hoh"];
@@ -438,9 +522,9 @@ export async function runLoop(ctx: Ctx, t: number): Promise<LoopResult> {
       loopIndex: t,
       baseCandidateId,
       overlay,
-      previousEvidence,
-      ledger,
-      previousChecks,
+      previousEvidence: omitPlannerEvidence ? null : previousEvidence,
+      ledger: plannerLedger,
+      previousChecks: omitPlannerEvidence ? null : previousChecks,
     });
     await writeJson(paths.plannerJson(t), planner);
     await writeText(paths.developmentDocument(t), developmentDocument);
@@ -459,44 +543,72 @@ export async function runLoop(ctx: Ctx, t: number): Promise<LoopResult> {
       log(`${tag} developer: reusing recorded candidate ${developer.candidate_id} (resume)`);
     } else {
     process.env.HOH_ROLE = "developer";
-    const preDevelopmentCommit = await headCommit(ws);
+    if (fixedA0) {
+      await restoreArtifactAtCommit(ws, ".", fixedA0.commit_oid);
+      const restoredWorkspaceTree = await artifactTreeHash(ws, { subdir: "." });
+      if (restoredWorkspaceTree !== fixedA0.workspace_tree_oid) {
+        throw new Error(
+          `no-warm-start full A0 restore produced ${restoredWorkspaceTree.slice(0, 12)}, expected ${fixedA0.workspace_tree_oid.slice(0, 12)}`,
+        );
+      }
+      const restoredTree = await artifactTreeHash(ws, { subdir: artifactDir });
+      if (restoredTree !== fixedA0.tree_oid) {
+        throw new Error(
+          `no-warm-start A0 restore produced ${restoredTree.slice(0, 12)}, expected ${fixedA0.tree_oid.slice(0, 12)}`,
+        );
+      }
+    }
+    const preDevelopmentCommit = fixedA0?.commit_oid ?? (await headCommit(ws));
     if (!preDevelopmentCommit) throw new Error(`cannot start Developer for loop ${t}: workspace has no base commit`);
     const recordSpec = [".hoh"];
     // Anything already dirty under .hoh before the developer starts belongs to the runtime, not to the developer.
-    const dirtyBefore = new Set(await pathsChanged(ws, recordSpec));
+    const dirtyBefore = new Set(await pathsChanged(ws, recordSpec, { includeIgnored: Boolean(ctx.experimentPolicy) }));
     log(`${tag} developer: start`);
-    const developerPrompts = await renderDeveloperPrompts({
-      loopIndex: t,
-      cwd: ws,
-      artifactDir,
-      specPath: run.spec_path,
-      spec,
-      devDocPath: paths.rel(paths.developmentDocument(t)),
-      developmentDocument,
-      baseCandidateId,
-      previousChangedPaths: previousDeveloper?.changed_paths ?? [],
-    });
-    const developerRun = await invokeRole(ctx, {
-      role: "developer",
-      loopIndex: t,
-      cwd: ws,
-      systemPrompt: developerPrompts.system,
-      prompt: developerPrompts.user,
-      tools: CODING_TOOLS,
-      structuredTools: [],
-      transcriptPath: paths.transcript(t, "developer"),
-      timeoutMs: roleTimeoutMs,
-      model: modelForRole(config, "developer"),
-    });
-    const violations: string[] = [];
+    const developerView = fixedA0 ? await prepareNoWarmDeveloperView(ctx, t) : null;
+    const developerCwd = developerView?.cwd ?? ws;
+    let developerPrompts: Awaited<ReturnType<typeof renderDeveloperPrompts>>;
+    let developerRun: Awaited<ReturnType<typeof invokeRole>>;
+    let developerHeadMoved = false;
+    try {
+      developerPrompts = await renderDeveloperPrompts({
+        loopIndex: t,
+        cwd: developerCwd,
+        artifactDir,
+        specPath: run.spec_path,
+        spec,
+        devDocPath: paths.rel(paths.developmentDocument(t)),
+        developmentDocument,
+        baseCandidateId,
+        previousChangedPaths: fixedA0 ? [] : previousDeveloper?.changed_paths ?? [],
+      });
+      developerRun = await invokeRole(ctx, {
+        role: "developer",
+        loopIndex: t,
+        cwd: developerCwd,
+        systemPrompt: developerPrompts.system,
+        prompt: developerPrompts.user,
+        tools: CODING_TOOLS,
+        structuredTools: [],
+        transcriptPath: paths.transcript(t, "developer"),
+        timeoutMs: roleTimeoutMs,
+        model: modelForRole(config, "developer"),
+      });
+      if (developerView) developerHeadMoved = await developerView.install();
+    } finally {
+      if (!developerView && ctx.experimentPolicy) {
+        developerHeadMoved = await reanchorRoleHead(ws, preDevelopmentCommit);
+      }
+      if (developerView) await developerView.cleanup();
+    }
+    const violations: string[] = developerHeadMoved ? ["moved Git HEAD during Developer invocation (re-anchored)"] : [];
     // Runtime records are off limits to the Developer; the runtime's own transcript for this loop is not a violation.
     const budgetRel = paths.rel(paths.budget).replaceAll(path.sep, "/");
-    const hohChanges = (await pathsChanged(ws, recordSpec)).filter(
+    const hohChanges = (await pathsChanged(ws, recordSpec, { includeIgnored: Boolean(ctx.experimentPolicy) })).filter(
       (p) => !dirtyBefore.has(p) && p.replaceAll(path.sep, "/") !== budgetRel,
     );
     if (hohChanges.length) {
       violations.push(...hohChanges.map((p) => `modified runtime record ${p} (reverted)`));
-      await restorePaths(ws, hohChanges.map((p) => `:(literal)${p}`));
+      await restorePaths(ws, hohChanges.map((p) => `:(literal)${p}`), { includeIgnored: Boolean(ctx.experimentPolicy) });
       log(`${tag} developer: WARNING reverted ${hohChanges.length} change(s) under .hoh/`);
     }
     await installCapturedTranscript(developerRun.transcript, ctx.storageSecrets);
@@ -1225,6 +1337,168 @@ async function resolveDeveloperCommitRange(
     throw new Error(`cannot reconstruct the base commit for legacy candidate ${developer.candidate_id}`);
   }
   return { baseCommit: parent.stdout.trim(), candidateCommit };
+}
+
+async function prepareNoEvidencePlannerView(ctx: Ctx, loopIndex: number): Promise<{ cwd: string; cleanup: () => Promise<void> }> {
+  const cwd = await mkdtemp(path.join(os.tmpdir(), `hoh-${ctx.run.run_id}-no-evidence-plan-${pad(loopIndex)}-`));
+  const previousWorkspace = process.env.HOH_WORKSPACE;
+  try {
+    for (const entry of await readdir(ctx.ws, { withFileTypes: true })) {
+      if (entry.name === ".git" || entry.name === ".hoh") continue;
+      await cp(path.join(ctx.ws, entry.name), path.join(cwd, entry.name), {
+        recursive: entry.isDirectory(),
+        preserveTimestamps: true,
+      });
+    }
+    // A standalone one-snapshot repository prevents prior evidence from being
+    // recovered through linked-worktree Git metadata or object history.
+    await ensureRepo(cwd);
+    let snapshotCommit = await commitAll(cwd, "chore(experiment): install no-evidence planner snapshot", RUNTIME_IDENTITY, ["."]);
+    if (!snapshotCommit) {
+      await git(["commit", "-q", "--allow-empty", "--no-verify", "-m", "chore(experiment): install empty planner snapshot"], cwd, {
+        env: {
+          GIT_AUTHOR_NAME: RUNTIME_IDENTITY.name,
+          GIT_AUTHOR_EMAIL: RUNTIME_IDENTITY.email,
+          GIT_COMMITTER_NAME: RUNTIME_IDENTITY.name,
+          GIT_COMMITTER_EMAIL: RUNTIME_IDENTITY.email,
+        },
+      });
+      snapshotCommit = await headCommit(cwd);
+    }
+    if (!snapshotCommit) throw new Error(`cannot initialize no-evidence Planner snapshot for loop ${loopIndex}`);
+
+    // Only the public specification and its spec-derived fixed catalog remain
+    // under .hoh. Prior checks, evidence, ledger, coverage, condition metadata,
+    // and their Git history are absent from this Planner filesystem view.
+    await mkdir(path.join(cwd, ".hoh"), { recursive: true });
+    await copyFile(ctx.paths.spec, path.join(cwd, ctx.run.spec_path));
+    try {
+      await copyFile(ctx.paths.claims, path.join(cwd, ctx.paths.rel(ctx.paths.claims)));
+    } catch (error: any) {
+      if (error?.code !== "ENOENT") throw error;
+    }
+    process.env.HOH_WORKSPACE = cwd;
+    return {
+      cwd,
+      cleanup: async () => {
+        if (previousWorkspace === undefined) delete process.env.HOH_WORKSPACE;
+        else process.env.HOH_WORKSPACE = previousWorkspace;
+        await rm(cwd, { recursive: true, force: true });
+      },
+    };
+  } catch (error) {
+    if (previousWorkspace === undefined) delete process.env.HOH_WORKSPACE;
+    else process.env.HOH_WORKSPACE = previousWorkspace;
+    await rm(cwd, { recursive: true, force: true });
+    throw error;
+  }
+}
+
+async function prepareNoWarmDeveloperView(
+  ctx: Ctx,
+  loopIndex: number,
+): Promise<{ cwd: string; install: () => Promise<boolean>; cleanup: () => Promise<void> }> {
+  const cwd = await mkdtemp(path.join(os.tmpdir(), `hoh-${ctx.run.run_id}-a0-develop-${pad(loopIndex)}-`));
+  const previousWorkspace = process.env.HOH_WORKSPACE;
+  try {
+    for (const entry of await readdir(ctx.ws, { withFileTypes: true })) {
+      if (entry.name === ".git" || entry.name === ".hoh") continue;
+      await cp(path.join(ctx.ws, entry.name), path.join(cwd, entry.name), {
+        recursive: entry.isDirectory(),
+        preserveTimestamps: true,
+      });
+    }
+    await ensureRepo(cwd);
+    let baselineCommit = await commitAll(cwd, "chore(experiment): install isolated A0", RUNTIME_IDENTITY, ["."]);
+    if (!baselineCommit) {
+      await git(["commit", "-q", "--allow-empty", "--no-verify", "-m", "chore(experiment): install empty isolated A0"], cwd, {
+        env: {
+          GIT_AUTHOR_NAME: RUNTIME_IDENTITY.name,
+          GIT_AUTHOR_EMAIL: RUNTIME_IDENTITY.email,
+          GIT_COMMITTER_NAME: RUNTIME_IDENTITY.name,
+          GIT_COMMITTER_EMAIL: RUNTIME_IDENTITY.email,
+        },
+      });
+      baselineCommit = await headCommit(cwd);
+    }
+    if (!baselineCommit) throw new Error(`cannot initialize isolated A0 Developer view for loop ${loopIndex}`);
+
+    const isolatedSpec = path.join(cwd, ctx.run.spec_path);
+    const isolatedDocument = path.join(cwd, ctx.paths.rel(ctx.paths.developmentDocument(loopIndex)));
+    await mkdir(path.dirname(isolatedSpec), { recursive: true });
+    await mkdir(path.dirname(isolatedDocument), { recursive: true });
+    await copyFile(ctx.paths.spec, isolatedSpec);
+    await copyFile(ctx.paths.developmentDocument(loopIndex), isolatedDocument);
+    process.env.HOH_WORKSPACE = cwd;
+
+    return {
+      cwd,
+      install: async () => {
+        const headMoved = await reanchorRoleHead(cwd, baselineCommit);
+        await git(["reset", "-q", "HEAD", "--", ".hoh"], cwd, { allowFail: true });
+        await commitAll(cwd, `feat(loop-${pad(loopIndex)}): isolated A0 development result`, ROLE_IDENTITY.developer, [
+          ".",
+          ":(exclude).hoh",
+        ]);
+        const isolatedCandidate = await headCommit(cwd);
+        if (!isolatedCandidate) throw new Error(`isolated A0 Developer loop ${loopIndex} produced no candidate commit`);
+        await git(["fetch", "-q", "--no-tags", cwd, isolatedCandidate], ctx.ws);
+        await restoreArtifactAtCommit(ctx.ws, ".", isolatedCandidate);
+        return headMoved;
+      },
+      cleanup: async () => {
+        if (previousWorkspace === undefined) delete process.env.HOH_WORKSPACE;
+        else process.env.HOH_WORKSPACE = previousWorkspace;
+        await rm(cwd, { recursive: true, force: true });
+      },
+    };
+  } catch (error) {
+    if (previousWorkspace === undefined) delete process.env.HOH_WORKSPACE;
+    else process.env.HOH_WORKSPACE = previousWorkspace;
+    await rm(cwd, { recursive: true, force: true });
+    throw error;
+  }
+}
+
+/** Preserve role-produced files while returning Git history to the fixed pre-role parent. */
+async function reanchorRoleHead(workspace: string, expectedHead: string): Promise<boolean> {
+  const observed = await headCommit(workspace);
+  if (observed === expectedHead) return false;
+  await git(["reset", "--mixed", "-q", expectedHead], workspace);
+  const restored = await headCommit(workspace);
+  if (restored !== expectedHead) {
+    throw new Error(`could not restore Git HEAD after role invocation (expected ${expectedHead}, observed ${restored ?? "none"})`);
+  }
+  return true;
+}
+
+/** Restore only the configured product boundary to a historical tree, leaving `.hoh` untouched. */
+async function restoreArtifactAtCommit(workspace: string, artifactDir: string, commitOid: string): Promise<void> {
+  const pathspec = artifactDir === "." ? [".", ":(exclude).hoh"] : [`:(top,literal)${artifactDir}`];
+  // ls-tree does not support exclude pathspec magic on all supported Git
+  // versions, so enumerate names and apply the canonical artifact boundary in
+  // process before any mutation.
+  const sourceResult = await git(["ls-tree", "-r", "--name-only", "-z", commitOid], workspace);
+  const currentResult = await git(["ls-files", "-z"], workspace);
+  const withinArtifact = (relativePath: string) =>
+    !isRuntimePath(relativePath) &&
+    (artifactDir === "." || relativePath === artifactDir || relativePath.startsWith(`${artifactDir}/`));
+  const sourcePaths = new Set(sourceResult.stdout.split("\0").filter(withinArtifact));
+  const currentPaths = currentResult.stdout.split("\0").filter(withinArtifact);
+
+  // Exact A0 semantics include ignored and ordinary untracked product files.
+  await git(["clean", "-fdxq", "--", ...pathspec], workspace);
+  for (const relativePath of currentPaths) {
+    if (sourcePaths.has(relativePath)) continue;
+    await git(["rm", "-fq", "--", `:(top,literal)${relativePath}`], workspace);
+  }
+  for (const relativePath of sourcePaths) {
+    await git(["checkout", "-q", commitOid, "--", `:(top,literal)${relativePath}`], workspace);
+  }
+}
+
+function isRuntimePath(relativePath: string): boolean {
+  return relativePath === ".hoh" || relativePath.startsWith(".hoh/");
 }
 
 function oneLine(s: string, max = 96): string {
