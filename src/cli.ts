@@ -52,7 +52,7 @@ import { collectLoops } from "./runtime/report.js";
 import { loadBudgetLedger, loadLedger, loadRun, readJson, RunPaths } from "./runtime/state.js";
 import { ROLES, type BudgetLedger } from "./types.js";
 
-const USAGE = `hoh — Harness-of-Harness runtime on top of the pi coding agent
+const USAGE = `hoh — Harness-of-Harness runtime for supported coding-agent harnesses
 
 Usage:
   hoh run    --workspace <dir> --spec <PRD.md> [--config <file>] [--loops <n>] [--detach]
@@ -118,8 +118,18 @@ async function showConfig(r: Resolved, log: (m: string) => void): Promise<number
     process.stdout.write(`Invalid:\n  - ${errors.join("\n  - ")}\n`);
     return 1;
   }
-  if (r.effective.harness !== "pi") {
+  if (r.effective.harness === "mock") {
     for (const role of ROLES) process.stdout.write(`  ${role.padEnd(9)} ${modelForRole(r.effective, role) ?? "(mock)"}\n`);
+    return 0;
+  }
+  if (r.effective.harness === "codex") {
+    const harness = await createHarness(r.effective, r.workspace, { log });
+    process.stdout.write(`Codex adapter: ${harness.version ?? "unknown"}\nModels per role:\n`);
+    for (const role of ROLES) {
+      const pattern = modelForRole(r.effective, role);
+      const resolved = await harness.resolveModel?.(pattern);
+      process.stdout.write(`  ${role.padEnd(9)} ${pattern ?? "(missing)"}  -> ${resolved ?? "(unresolved)"}\n`);
+    }
     return 0;
   }
   const { modelRuntime, models, modelsPath } = await createModelRuntime(r.effective, r.workspace, { log });

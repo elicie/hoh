@@ -17,7 +17,7 @@ import path from "node:path";
 import { PI_BUILTIN_TOOL_NAMES } from "../harness/types.js";
 import { ROLES, type CheckSpec, type Role } from "../types.js";
 
-export type HarnessName = "pi" | "mock";
+export type HarnessName = "pi" | "codex" | "mock";
 export type ExecutionProtocol = "paper" | "extended";
 
 export type ProviderApi = "openai-completions" | "openai-responses" | "anthropic-messages";
@@ -54,7 +54,7 @@ export interface ProviderConfig {
 }
 
 export interface ModelsConfig {
-  /** pi model pattern, e.g. "anthropic/claude-opus-5:high", "minimax/MiniMax-M3", "openai-codex/gpt-5.5:high" */
+  /** Adapter model pattern, e.g. "anthropic/claude-opus-5:high" or "codex/gpt-5.6:high". */
   default?: string;
   planner?: string;
   developer?: string;
@@ -252,7 +252,9 @@ export function validateConfig(c: HohConfig): string[] {
   if (c.protocol !== "paper" && c.protocol !== "extended") {
     errors.push(`protocol must be "paper" or "extended", got ${JSON.stringify(c.protocol)}`);
   }
-  if (c.harness !== "pi" && c.harness !== "mock") errors.push(`harness must be "pi" or "mock", got ${JSON.stringify(c.harness)}`);
+  if (c.harness !== "pi" && c.harness !== "codex" && c.harness !== "mock") {
+    errors.push(`harness must be "pi", "codex", or "mock", got ${JSON.stringify(c.harness)}`);
+  }
   if (!Number.isInteger(c.loops) || c.loops < 1) errors.push(`loops must be a positive integer, got ${JSON.stringify(c.loops)}`);
   if (typeof c.artifact_dir !== "string" || !c.artifact_dir || path.isAbsolute(c.artifact_dir) || /[\0\r\n]/.test(c.artifact_dir)) {
     errors.push(`artifact_dir must be a relative path inside the workspace, got ${JSON.stringify(c.artifact_dir)}`);
@@ -271,8 +273,8 @@ export function validateConfig(c: HohConfig): string[] {
     if (v !== undefined && (typeof v !== "string" || !v.trim())) errors.push(`models.${k} must be a non-empty string`);
     if (!["default", "planner", "developer", "tester"].includes(k)) errors.push(`models.${k} is not a role (use default, planner, developer, tester)`);
   }
-  if (c.harness === "pi" && !c.models.default && !(c.models.planner && c.models.developer && c.models.tester)) {
-    errors.push("models.default (or planner+developer+tester) must be set for the pi harness");
+  if ((c.harness === "pi" || c.harness === "codex") && !c.models.default && !(c.models.planner && c.models.developer && c.models.tester)) {
+    errors.push(`models.default (or planner+developer+tester) must be set for the ${c.harness} harness`);
   }
   if (c.protocol === "paper") {
     const patterns = ROLES.map((role) => modelForRole(c, role) ?? null);
@@ -340,6 +342,13 @@ export function validateConfig(c: HohConfig): string[] {
     if (!Number.isFinite(c.retry.max_delay_ms) || c.retry.max_delay_ms < 0) errors.push("retry.max_delay_ms must be >= 0");
   }
   validateBudgetConfig(c.budgets, errors);
+  if (c.harness === "codex") {
+    for (const scope of ["role", "loop", "run"] as const) {
+      if (c.budgets?.[scope]?.cost !== undefined) {
+        errors.push(`budgets.${scope}.cost is unavailable for the codex harness because codex exec does not report monetary cost`);
+      }
+    }
+  }
   validatePiConfig(c.pi, errors);
   return errors;
 }

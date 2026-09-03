@@ -53,7 +53,7 @@
 | 11 | Developer 컨텍스트·토큰 절감 | Ops | 대기 | P2 | 0.5일 | 9 |
 | 12 | MCP 브리지 | Extension | 필요 시 | P3 | 1일 | 10 |
 | 13 | 샌드박스 실행 가이드 | Ops | 필요 시 | P3 | 1일 | 7 |
-| 14 | 추가 하네스 어댑터 | Experiment | 대기 | P2 | 1일/개 | 4 |
+| 14 | 추가 하네스 어댑터 | Experiment | Codex 완료 | 유지 | – | 4 |
 | 15 | 입력 receipt와 무결성 검증 | Full | 부분 완료 | P2 | 0.5일 | 3, 4 |
 | 16 | 실행 리포트 확장 | Ops | 부분 완료 | P2 | 1일 | 3, 15 |
 | 17 | 프로젝트 유형별 검증 키트 | Extension | 부분 완료 | P3 | 0.5일/개 | – |
@@ -219,7 +219,7 @@ CLI나 프로젝트 도구로 표현할 수 없는 브라우저, DB, 외부 서�
 
 장시간 또는 신뢰할 수 없는 입력을 실행할 때 필요한 격리 경계, workspace mount, secret 전달, 브라우저 의존성, 네트워크 정책을 문서화한다. Docker나 인프라 변경은 사용자의 해당 작업에 대한 명시적 승인과 프로젝트 인프라 지침 확인 없이는 실행하지 않는다.
 
-## 14. 추가 하네스 어댑터 — 실험 준비
+## 14. 추가 하네스 어댑터 — Codex 최소 완료
 
 논문의 하네스 비교를 재현하려면 우선 Codex와 OpenCode 계열 어댑터를 대상으로 한다. Claude 등 논문 표에 없는 조합은 확장 실험으로 분리한다.
 
@@ -230,7 +230,15 @@ CLI나 프로젝트 도구로 표현할 수 없는 브라우저, DB, 외부 서�
 - 역할별 도구 권한과 QA 후보 동결
 - usage, transcript, 실패 사유를 공통 receipt로 변환
 
-어댑터 수를 늘리기 전에 하나의 대체 하네스로 end-to-end 실험 manifest가 재현되는지 먼저 검증한다.
+완료된 최소 경로:
+
+- 공식 non-interactive `codex exec` 인터페이스를 직접 spawn하고 shell command string을 사용하지 않는다. `--ephemeral`, ambient config/rule 차단, 명시적 model/reasoning, JSONL transcript, output schema와 last-message 경로를 고정한다.
+- Planner는 read-only, Developer는 workspace-write, Tester는 격리된 후보 사본의 workspace-write sandbox를 사용한다. Tester 결과의 frozen 검사는 공통 runtime이 다시 수행한다.
+- Codex가 pi의 개별 built-in allowlist를 제공하는 것처럼 기록하지 않고 adapter-native sandbox capability를 protocol role contract에 고정한다.
+- CLI version, usage, structured output, timeout·외부 취소 process-group 종료를 공통 결과로 변환한다. monetary cost를 보고하지 않는 Codex run에는 cost budget을 허용하지 않는다.
+- 가짜 Codex CLI를 통한 `paper` 1-loop 통합 테스트가 동일 모델 receipt, 세 역할 분리 호출, structured deliverable과 완료 상태를 검증한다.
+
+OpenCode 계열 두 번째 어댑터는 Codex로 18번 end-to-end experiment manifest를 먼저 재현한 뒤 추가한다. 논문 실험 재현 완료 판정에는 최소 한 개 대체 어댑터면 충분하므로 지금은 어댑터 수를 늘리지 않는다.
 
 ## 15. 입력 receipt와 무결성 검증 — 부분 완료
 

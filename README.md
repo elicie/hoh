@@ -1,4 +1,4 @@
-# hoh — Harness-of-Harness on top of the pi coding agent
+# hoh — Harness-of-Harness runtime
 
 An implementation of the Harness-of-Harness (HoH) loop from
 *Harness of Harness: Multi-Day Autonomous Software Development with Continual Improvement*
@@ -15,19 +15,24 @@ for t = 1..T:
   E_t = Tester(read_only(A_t); S, D_t, Runtime.check(A_t))   # evidence bundle
 ```
 
-The inner harness is the [pi coding agent](https://github.com/earendil-works/pi)
-through its SDK (one of the three harnesses evaluated in the paper). The
-runtime in this repository is the part the paper calls "the deterministic
-Runtime": it freezes each role's inputs, enforces permissions, binds evidence
-to the exact candidate, and records every loop in git.
+The default inner harness is the [pi coding agent](https://github.com/earendil-works/pi)
+through its SDK (one of the harnesses evaluated in the paper). A Codex CLI
+adapter is also available for controlled comparison runs. The runtime in this
+repository is the part the paper calls "the deterministic Runtime": it freezes
+each role's inputs, enforces permissions, binds evidence to the exact candidate,
+and records every loop in git.
 
 ## What the runtime enforces
 
-| Role | Tools (pi allowlist) | Working directory | Deliverable |
+| Role | Default pi allowlist | Working directory | Deliverable |
 | --- | --- | --- | --- |
 | Project Planner | `read grep find ls` + `submit_development_document` | workspace | D_t (`development_document.md`) |
 | Developer | `read bash edit write grep find ls` | workspace | A_t (commit + artifact tree hash → candidate id) |
 | QA Tester | `read bash grep find ls` + `submit_evidence` | isolated git worktree of the candidate | E_t (`evidence.json`) |
+
+Codex runs preserve the same workspace boundaries and structured deliverables,
+but their immutable receipt names the actual Codex sandbox capability instead
+of pretending that Codex exposes pi's individual built-in tool names.
 
 - **Run protocol.** `protocol: "paper"` fixes the base harness and version,
   one model/reasoning pattern, role prompt and tool contracts, runtime policy,
@@ -168,7 +173,7 @@ iterations/loop-NN/
   evidence/                 hashed QA artifacts and retained check output
   prompts/<role>.json       exact final system/user prompt snapshot and hashes
   tester_report.md          human-readable QA report
-  transcripts/<role>.jsonl  pi session events (or mock records)
+  transcripts/<role>.jsonl  adapter session events (or mock records)
   error.json                present only when the loop aborted
 ```
 
@@ -228,7 +233,7 @@ lists can be discovered from `GET {base_url}/models`. The root config uses
 | Key | Meaning |
 | --- | --- |
 | `protocol` | `paper` fixes the initial harness/model/role/runtime contract and `T`; `extended` permits the product-specific overrides described below. Missing means legacy `extended` |
-| `harness` | `pi` (real) or `mock` (scripted dry run) |
+| `harness` | `pi` (in-process SDK), `codex` (non-interactive Codex CLI), or `mock` (scripted dry run) |
 | `providers.<name>.base_url` | OpenAI-compatible endpoint (`…/v1`); may reference `$ENV` |
 | `providers.<name>.api_key` | `"$ENV_VAR"` or `"!command"`. Literal keys are accepted only for localhost endpoints, because the config is committed with the run record |
 | `providers.<name>.api` | `openai-completions` (default), `openai-responses`, or `anthropic-messages` |
@@ -236,7 +241,7 @@ lists can be discovered from `GET {base_url}/models`. The root config uses
 | `providers.<name>.discover.exclude` / `include` | regex fragments applied to discovered ids |
 | `providers.<name>.model_defaults` / `model_overrides` | `reasoning`, `context_window`, `max_tokens`, `input`, `cost`, `compat` per model; overrides are keyed by model id |
 | `providers.<name>.headers` / `compat` | extra headers (`$ENV` allowed) and pi compat flags (snake_case accepted) |
-| `models.default` | model pattern used by every role: `provider/model[:thinking]`. Custom providers from `providers` and pi's built-in ones (`anthropic/…`, `openai-codex/…`, `minimax/…`) both work |
+| `models.default` | model pattern used by every role: pi uses `provider/model[:thinking]`; Codex accepts `codex/model[:minimal\|low\|medium\|high\|xhigh]` |
 | `models.planner` / `developer` / `tester` | per-role override for `extended`; under `paper`, every configured pattern must be identical and the receipt records its concrete resolution |
 | `loops` | iteration budget T |
 | `artifact_dir` | artifact directory inside the workspace (`.` = whole workspace minus `.hoh/`) |
@@ -246,11 +251,29 @@ lists can be discovered from `GET {base_url}/models`. The root config uses
 | `timeouts.provider_ms` | per-provider-request ceiling; pi SDK retries stay disabled so the same pi session owns retry classification |
 | `timeouts.output_idle_ms` / `websocket_connect_ms` | stream-silence watchdog and WebSocket handshake ceiling |
 | `retry.*` | same-session transient retry policy: enablement, retry count, exponential-backoff base and maximum accepted server delay |
-| `budgets.role` / `loop` / `run` | optional ceilings with `elapsed_ms` (positive integer), `total_tokens` (positive integer), and fractional `cost` (positive finite number). Omit any scope or metric to leave it unlimited |
+| `budgets.role` / `loop` / `run` | optional ceilings with `elapsed_ms` (positive integer), `total_tokens` (positive integer), and fractional `cost` (positive finite number). Omit any scope or metric to leave it unlimited. Codex CLI does not report monetary cost, so Codex configs may use elapsed/token limits but not `cost` |
 | `pi.agent_dir` | pi's credential/models directory (default `~/.pi/agent`) |
 | `pi.extensions` / `pi.skills` | reviewed workspace-relative resource paths loaded for every role; ambient pi discovery remains disabled |
 | `pi.roles.<role>.extensions` / `skills` | additional resources loaded only for `planner`, `developer`, or `tester` |
 | `pi.roles.<role>.extension_tools` | exact extension-registered tool names exposed to that role; built-in and `submit_*` names are reserved |
+
+A minimal Codex run uses the installed `codex` executable and its own existing
+authentication. The adapter fixes the CLI version, ignores ambient Codex config
+and repository instructions, supplies HoH's role prompt explicitly, disables
+interactive approval and web search, and maps `--json` plus `--output-schema`
+back into the common role result:
+
+```json
+{
+  "protocol": "paper",
+  "harness": "codex",
+  "models": { "default": "codex/gpt-5.6:high" },
+  "loops": 3,
+  "artifact_dir": ".",
+  "checks": [],
+  "budgets": { "run": { "elapsed_ms": 32400000, "total_tokens": 750000 } }
+}
+```
 
 For example, this loads one shared skill for every role while loading a
 reviewed extension and its tool only for the Developer:
@@ -370,6 +393,9 @@ npm test
   QA worktree cleanup without false QA or runtime-failure records.
 - `budget.test.ts`: config validation, role-boundary blocking, cumulative
   elapsed/token/cost accounting, resume stability, and error-free exhaustion.
+- `codex-harness.test.ts`: exact non-interactive CLI flags, schema mapping,
+  process-group cancellation, adapter versioning, native role-policy receipts,
+  config validation, and a complete paper-protocol loop through a fake CLI.
 - `ledger.test.ts`: exact gap identity, duplicate and replay idempotence,
   adjacent-loop escalation, and open/closed/regressed transitions.
 - `config.test.ts`: config merge and validation, paper/extended protocol
@@ -400,7 +426,8 @@ npm test
 
 - **Another inner harness.** Implement `Harness` in `src/harness/types.ts`
   (one `invoke` per role) and pass it to `runHoh`. The paper's protocol is
-  harness-agnostic; the pi adapter is `src/harness/pi.ts`.
+  harness-agnostic; the current adapters are `src/harness/pi.ts` and
+  `src/harness/codex.ts`.
 - **Domain tools and skills.** The Fusepoint run used Godot MCP, asset tools
   and skills. With pi, declare reviewed local paths and per-role extension-tool
   names under the `pi` config shown above; the adapter keeps ambient discovery

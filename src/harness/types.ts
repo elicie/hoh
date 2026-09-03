@@ -55,6 +55,12 @@ export interface RoleResult {
   retryCount?: number;
 }
 
+export interface HarnessRolePolicy {
+  workspace: "active-read-only" | "active-writer" | "isolated-read-only";
+  /** Adapter-native capability names recorded in the immutable protocol receipt. */
+  builtinTools: readonly string[];
+}
+
 export interface Harness {
   readonly name: string;
   /** Adapter/package version recorded in the immutable protocol receipt. */
@@ -63,6 +69,8 @@ export interface Harness {
   readonly resourceManifest?: HarnessResourceManifest;
   /** Resolve a configured pattern to the concrete model/reasoning identity used by this adapter. */
   resolveModel?(pattern?: string): Promise<string | null>;
+  /** Override the default pi-style tool receipt when an adapter enforces rights through another mechanism. */
+  rolePolicy?(role: Role): HarnessRolePolicy;
   invoke(inv: RoleInvocation): Promise<RoleResult>;
 }
 

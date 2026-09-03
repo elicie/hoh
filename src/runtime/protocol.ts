@@ -103,9 +103,10 @@ export async function buildProtocolReceipt(
   const roleContracts = Object.fromEntries(
     ROLES.map((role) => {
       const contract = toolsByRole[role];
+      const adapterPolicy = harness.rolePolicy?.(role);
       const receipt: RoleContractReceipt = {
-        workspace: contract.workspace,
-        builtin_tools: [...contract.builtin],
+        workspace: adapterPolicy?.workspace ?? contract.workspace,
+        builtin_tools: [...(adapterPolicy?.builtinTools ?? contract.builtin)],
         structured_tools: contract.structured.map((tool) => tool.name),
         system_prompt_sha256: promptHashes[role].system,
         user_prompt_sha256: promptHashes[role].user,

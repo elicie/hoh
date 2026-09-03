@@ -9,6 +9,7 @@ import { assertPiResourceManifestCurrent, buildPiResourceManifest } from "../run
 import { materializePiModels, type PiModelsJson } from "../runtime/providers.js";
 import { RunPaths } from "../runtime/state.js";
 import type { Role } from "../types.js";
+import { CodexHarness, detectCodexVersion, type CodexHarnessOptions } from "./codex.js";
 import { createDemoMockHarness } from "./mock.js";
 import { PiHarness } from "./pi.js";
 import type { Harness } from "./types.js";
@@ -25,6 +26,8 @@ export interface FactoryOptions {
   fetchImpl?: typeof fetch;
   /** extra ModelRuntime.create options (tests) */
   runtimeOptions?: Parameters<typeof ModelRuntime.create>[0];
+  /** Codex executable injection for tests or non-default installations. */
+  codex?: CodexHarnessOptions;
 }
 
 export async function createModelRuntime(config: HohConfig, workspace: string, opts: FactoryOptions = {}): Promise<RuntimeBuild> {
@@ -42,6 +45,11 @@ export async function createModelRuntime(config: HohConfig, workspace: string, o
 
 export async function createHarness(config: HohConfig, workspace: string, opts: FactoryOptions = {}): Promise<Harness> {
   if (config.harness === "mock") return createDemoMockHarness();
+  if (config.harness === "codex") {
+    const codex = opts.codex ?? {};
+    const version = codex.version ?? (await detectCodexVersion(codex));
+    return new CodexHarness({ ...codex, version });
+  }
   const resourceManifest = await buildPiResourceManifest(config, workspace);
   const { modelRuntime } = await createModelRuntime(config, workspace, opts);
   return new PiHarness({
