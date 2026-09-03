@@ -29,9 +29,12 @@ to the exact candidate, and records every loop in git.
 | Developer | `read bash edit write grep find ls` | workspace | A_t (commit + artifact tree hash → candidate id) |
 | QA Tester | `read bash grep find ls` + `submit_evidence` | isolated git worktree of the candidate | E_t (`evidence.json`) |
 
-- **Candidate identity.** After the Developer finishes, the runtime commits and
-  hashes the artifact tree (everything except `.hoh/`). The candidate id is
-  `loop-NN-<tree hash>`.
+- **Candidate identity.** After the Developer finishes, the runtime commits the
+  workspace and hashes only the configured `artifact_dir` subtree, respecting
+  Git ignore rules. `artifact_dir: "."` means the whole workspace except
+  `.hoh/`. The candidate id is `loop-NN-<tree hash>`. With a narrower
+  `artifact_dir`, files elsewhere can be present in the frozen commit but do not
+  change the candidate id or its before/after QA hash.
 - **Frozen QA.** Deterministic checks and the Tester run in a detached git
   worktree of that commit. The tree is hashed before checks, before Tester, and
   after Tester; a mismatch fails QA with a runtime blocker.
@@ -56,12 +59,17 @@ to the exact candidate, and records every loop in git.
   closed issue marks a regression. Open issues are shown to every Planner and
   Tester. Loop progress is measured by the ledger and the deterministic
   checks, not only by QA PASS (the Fusepoint trajectory has 2 PASS in 96 loops).
-- **Environment for tools.** Checks, `worktree_setup`, and the roles' shells see
-  `HOH_WORKSPACE` (main workspace), `HOH_CANDIDATE_DIR` (isolated worktree, during
-  checks and QA), `HOH_EVIDENCE_DIR` (durable files for the current QA loop),
-  `HOH_RUN_ID`, `HOH_LOOP`, `HOH_ROLE`. Untracked files (such as
-  `tools/node_modules`) are not in the worktree; tools can resolve them from
-  `$HOH_WORKSPACE` or be installed by `worktree_setup`.
+- **Environment for tools.** Every loop role invocation inherits
+  `HOH_WORKSPACE` (the main workspace), `HOH_RUN_ID`, `HOH_LOOP`, and
+  `HOH_ROLE` (the role name); roles that expose a shell can read them there.
+  `worktree_setup` and deterministic checks additionally receive
+  `HOH_CANDIDATE_DIR` (the isolated worktree), `HOH_EVIDENCE_DIR` (the main
+  workspace's durable evidence directory), and `HOH_ROLE=check`; the Tester
+  receives those two directories with `HOH_ROLE=tester`. `worktree_setup` runs
+  from the candidate worktree root, while checks run from its `artifact_dir`.
+  Untracked files (such as `tools/node_modules`) are not in the worktree; tools
+  can resolve them from `$HOH_WORKSPACE` or install worktree-local dependencies
+  in `worktree_setup`.
 - **Durable evidence files.** Checks preserve complete stdout and stderr (within
   the file limit) under the loop's `evidence/checks/` directory while keeping
   compact tails in JSON; oversized output becomes a small omission manifest.
@@ -69,13 +77,21 @@ to the exact candidate, and records every loop in git.
   path receive a runtime-computed SHA-256. Links and special files are rejected;
   limits are 2 MiB per file and 30 MiB per loop. Because these files are committed
   to git, checks must not print secrets or personal data.
-- **Resume.** Re-running `hoh run` continues after the last completed loop. Inside
-  a loop, recorded planner and developer results are reused, so a crash during QA
-  re-runs only the tester against the same candidate commit.
-- **Git record.** `docs(loop-NN)`, `feat(loop-NN)`, and `test(loop-NN)` commits
-  by `hoh-planner-bot`, `hoh-developer-bot`, and `hoh-tester-bot`, plus a
-  runtime `chore(loop-NN)` commit that freezes check logs before Tester access
-  and a regenerated `.hoh/README.md` development record.
+- **Resume.** Re-running `hoh run` continues after the last loop whose
+  `evidence.json` is committed at `HEAD`. In an incomplete loop, a recorded plan
+  and development document are reused; a recorded Developer result is reused
+  only when the current `artifact_dir` hash still matches it. Checks and the
+  Tester then run again against that same candidate tree. A mismatch aborts
+  instead of silently testing a different artifact.
+- **Git record and ownership.** `.hoh/` is runtime-managed: role attempts to
+  alter records outside their allowed output are reverted. A new run snapshots
+  the starting workspace and run records as `hoh-runtime`; configuration,
+  start-up, error, and pre-QA check-record updates also use that identity.
+  Planner, Developer, and final QA boundaries use `docs(loop-NN)`,
+  `feat(loop-NN)`, and `test(loop-NN)` commits by `hoh-planner-bot`,
+  `hoh-developer-bot`, and `hoh-tester-bot`. Before Tester access, a runtime
+  `chore(loop-NN)` commit freezes the Developer record and deterministic check
+  logs, so regenerated runtime files are not attributed to the next role.
 
 ## Layout of a run (`<workspace>/.hoh/`)
 
@@ -152,7 +168,7 @@ lists can be discovered from `GET {base_url}/models`.
 | `models.planner` / `developer` / `tester` | per-role override. The paper uses one fixed model for all roles; overrides are optional |
 | `loops` | iteration budget T |
 | `artifact_dir` | artifact directory inside the workspace (`.` = whole workspace minus `.hoh/`) |
-| `worktree_setup` | optional command run in the root of the isolated candidate worktree before the checks (e.g. `cd tools && npm ci`); recorded as check `setup` |
+| `worktree_setup` | optional command run once per QA attempt in the isolated candidate worktree root before the checks (e.g. `cd tools && npm ci`), with the `HOH_*` check environment; recorded as check `setup`, whose failure blocks QA. It must not create or change non-ignored files in `artifact_dir`, or the candidate hash check invalidates QA |
 | `checks[]` | deterministic commands run on the frozen candidate before QA (`name`, `command`, optional `timeout_min`) |
 | `timeouts.role_min` / `check_min` | wall-clock limits |
 | `pi.agent_dir` | pi's credential/models directory (default `~/.pi/agent`) |
@@ -165,9 +181,13 @@ Resolution order, first wins:
 4. built-in defaults
 
 `--loops <n>` is the only run-time override; it is stored back into the run config.
-Secrets never enter the record: `.env` files in the current directory and in
-the workspace are loaded automatically (this repo's `.env` is git-ignored), and
-the generated pi provider file `.hoh/pi-models.json` keeps `$ENV` references.
+Provider configuration records environment-variable references rather than
+literal keys: `.env` files in the current directory and workspace are loaded
+automatically (this repo's `.env` is git-ignored), and `.hoh/pi-models.json`
+keeps `$ENV` references. Shell-enabled roles, setup commands, and checks still
+inherit the runtime environment, so they can read or print those values. Use
+scoped credentials and trusted specifications/tooling; HoH is not an
+environment-variable sandbox.
 `hoh config` re-runs discovery and prints the model list; when the endpoint is
 unreachable, the previously discovered list is reused.
 Every role record stores the model that was actually used, so `.hoh/README.md`
@@ -178,6 +198,10 @@ node dist/cli.js config --workspace ../my-game   # effective config, per-role mo
 ```
 
 ## Install and run
+
+Use a dedicated, backed-up Git branch or workspace with no concurrent human
+edits. HoH creates commits and worktrees and reverts role writes that cross its
+runtime-record boundaries.
 
 ```bash
 npm install

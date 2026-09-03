@@ -1,0 +1,59 @@
+{
+  "harness": "pi",
+  "providers": {
+    "gateway": {
+      "base_url": "$GATEWAY_BASE_URL",
+      "api_key": "$GATEWAY_API_KEY",
+      "api": "openai-completions",
+      "models": [
+        {
+          "id": "DEVELOPER_MODEL_ID",
+          "context_window": 128000,
+          "max_tokens": 16384,
+          "reasoning": true
+        },
+        {
+          "id": "INDEPENDENT_TESTER_MODEL_ID",
+          "context_window": 128000,
+          "max_tokens": 16384,
+          "reasoning": true
+        }
+      ]
+    }
+  },
+  "models": {
+    "planner": "gateway/DEVELOPER_MODEL_ID:high",
+    "developer": "gateway/DEVELOPER_MODEL_ID:high",
+    "tester": "gateway/INDEPENDENT_TESTER_MODEL_ID:high"
+  },
+  "loops": 3,
+  "artifact_dir": "game",
+  "worktree_setup": "node -e \"const c=require('node:crypto'),f=require('node:fs'),e={'tools/playtest.mjs':'157c547b16629f078d8d0f7f8fdc1063b61b4b129a145c002b80f2e864e8c8ed','tools/syntax-check.mjs':'cf1b8b80283ec80269ee1f5b289a222849b88492472093a23f6856fc111eec25','tools/package.json':'94f079e3ea800ec46aa08938a2adfac6ceffa827f15310bef1c7e8fc7c5ed78d','tools/package-lock.json':'9e8316caff15ab2b387aea24acc22008dd9e6d1e6cd656b231d6b36ee3f43fc5'};for(const [p,h] of Object.entries(e)){const a=c.createHash('sha256').update(f.readFileSync(p)).digest('hex');if(a!==h)throw new Error(p+' sha256 mismatch: '+a)}\" && npm ci --prefix tools --ignore-scripts --no-audit --no-fund",
+  "checks": [
+    {
+      "name": "syntax",
+      "command": "node ../tools/syntax-check.mjs index.html",
+      "timeout_min": 1
+    },
+    {
+      "name": "boot",
+      "command": "node ../tools/playtest.mjs --file index.html --seconds 3 --fail-on-errors --expect state=title",
+      "timeout_min": 2
+    },
+    {
+      "name": "play",
+      "command": "node ../tools/playtest.mjs --file index.html --start --hold KeyZ --hold ArrowLeft@1:1.5 --hold ArrowRight@3:1.5 --seconds 10 --min-fps 55 --fail-on-errors --expect-not-state title",
+      "timeout_min": 2
+    },
+    {
+      "name": "boss",
+      "command": "node ../tools/playtest.mjs --file index.html --start --skip-to-boss@1 --seconds 3 --fail-on-errors --expect boss=true",
+      "timeout_min": 2
+    }
+  ],
+  "timeouts": {
+    "role_min": 45,
+    "check_min": 3
+  },
+  "pi": {}
+}

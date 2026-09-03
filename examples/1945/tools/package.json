@@ -1,0 +1,7 @@
+{
+  "name": "hoh-1945-tools",
+  "private": true,
+  "type": "module",
+  "description": "Reusable playtest tooling from the 1945 STRIKE HoH run (not part of the artifact)",
+  "dependencies": { "puppeteer-core": "25.9.0" }
+}

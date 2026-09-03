@@ -93,6 +93,7 @@ export const DEFAULT_CONFIG: HohConfig = {
   models: {},
   loops: 3,
   artifact_dir: ".",
+  worktree_setup: undefined,
   checks: [],
   timeouts: { role_min: 60, check_min: 10 },
   pi: {},

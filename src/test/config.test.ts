@@ -53,6 +53,9 @@ test("config: file resolution order and unknown keys", async () => {
     await writeFile(explicit, JSON.stringify({ harness: "mock", loops: 5 }));
     assert.equal((await pickConfigFile({ explicit, workspace: ws, cwd })).file, explicit);
 
+    await writeFile(explicit, JSON.stringify({ harness: "mock", worktree_setup: "npm ci" }));
+    assert.equal((await readConfigFile(explicit)).worktree_setup, "npm ci");
+
     await writeFile(explicit, JSON.stringify({ harness: "mock", model: "typo" }));
     await assert.rejects(readConfigFile(explicit), /unknown key "model"/);
     await writeFile(explicit, "{ not json");
