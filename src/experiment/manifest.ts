@@ -1,20 +1,45 @@
 /** Pre-registered experiment plan and append-only attempt outcomes. */
 import path from "node:path";
 import { canonicalSha256 } from "../runtime/protocol.js";
+import { EVALUATOR_LIMITS } from "./evaluator.js";
 
 export const EXPERIMENT_CONDITIONS = ["hoh", "vanilla", "no-plan-update", "no-evidence", "no-warm-start"] as const;
 export type ExperimentCondition = (typeof EXPERIMENT_CONDITIONS)[number];
 
 export type ExperimentBudgetUnit = "wall_clock_ms" | "total_tokens" | "cost_usd";
 
+export const EXPERIMENT_ARTIFACT_PACKAGER = "git-archive-tar-v1" as const;
+
+export interface ExperimentExecution {
+  readonly config_sha256: string;
+  readonly loops: number;
+  readonly artifact_dir: string;
+  readonly artifact_packager: typeof EXPERIMENT_ARTIFACT_PACKAGER;
+  readonly harness: {
+    readonly name: string;
+    readonly version: string;
+  };
+  /** One concrete model/reasoning identity shared by all conditions. */
+  readonly resolved_model: string;
+  readonly condition_policy_version: string;
+}
+
 export interface ExperimentSample {
   readonly task_id: string;
   readonly sample_id: string;
+  readonly spec_sha256: string;
+  readonly evaluator_task_sha256: string;
+  readonly evaluator_sample_sha256: string;
+  readonly a0: {
+    readonly workspace_tree_oid: string;
+    readonly artifact_tree_oid: string;
+  };
 }
 
 export interface ExperimentCell {
   readonly id: string;
   readonly condition: ExperimentCondition;
+  readonly protocol_sha256: string;
 }
 
 export interface ExperimentBudget {
@@ -38,6 +63,7 @@ export interface ExperimentRetryRules {
 }
 
 export interface ExperimentPlan {
+  readonly execution: ExperimentExecution;
   readonly samples: readonly ExperimentSample[];
   readonly repetitions: number;
   readonly assignment_seed: number;
@@ -47,8 +73,8 @@ export interface ExperimentPlan {
   readonly budget: ExperimentBudget;
   readonly evaluator: ExperimentEvaluator;
   readonly metric: string;
-  readonly aggregation: string;
-  readonly uncertainty: string;
+  readonly aggregation: "macro_mean";
+  readonly uncertainty: "bootstrap_95_ci";
   readonly exclusion_rules: readonly string[];
   readonly retry: ExperimentRetryRules;
 }
@@ -77,6 +103,10 @@ export interface ExperimentAttemptOutcome {
   readonly repetition: number;
   readonly retry: ExperimentAttemptRetry;
   readonly run_receipt_sha256: string;
+  readonly condition_contract_sha256: string;
+  readonly protocol_receipt_sha256: string;
+  /** Null only when an excluded failed/cancelled attempt never reached evaluation. */
+  readonly evaluator_receipt_sha256: string | null;
   readonly status: ExperimentAttemptStatus;
   readonly failure: ExperimentAttemptFailure | null;
   readonly valid: boolean;
@@ -84,13 +114,15 @@ export interface ExperimentAttemptOutcome {
 }
 
 export interface ExperimentManifest {
-  readonly schema_version: 1;
+  readonly schema_version: 2;
   readonly plan: ExperimentPlan;
   readonly plan_sha256: string;
   readonly attempts: readonly ExperimentAttemptOutcome[];
 }
 
 const HEX_SHA256 = /^[0-9a-f]{64}$/;
+const GIT_OID = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
+const EVALUATOR_VERSION_BYTES = 256;
 const CONDITIONS = new Set<string>(EXPERIMENT_CONDITIONS);
 const BUDGET_UNITS = new Set<string>(["wall_clock_ms", "total_tokens", "cost_usd"] satisfies ExperimentBudgetUnit[]);
 const ATTEMPT_STATUSES = new Set<string>(["completed", "failed", "cancelled"] satisfies ExperimentAttemptStatus[]);
@@ -98,14 +130,14 @@ const ATTEMPT_STATUSES = new Set<string>(["completed", "failed", "cancelled"] sa
 /** Validate, detach, hash, and freeze a plan before any attempt exists. */
 export function createExperimentManifest(value: unknown): ExperimentManifest {
   const plan = parsePlan(value, "plan");
-  return freezeManifest({ schema_version: 1, plan, plan_sha256: canonicalSha256(plan), attempts: [] });
+  return freezeManifest({ schema_version: 2, plan, plan_sha256: canonicalSha256(plan), attempts: [] });
 }
 
 /** Strictly parse a serialized manifest, including its immutable plan hash and attempt chain. */
 export function parseExperimentManifest(value: unknown): ExperimentManifest {
   const raw = record(value, "manifest");
   exactKeys(raw, ["schema_version", "plan", "plan_sha256", "attempts"], "manifest");
-  if (raw.schema_version !== 1) fail("manifest.schema_version", "must be 1");
+  if (raw.schema_version !== 2) fail("manifest.schema_version", "must be 2");
   const plan = parsePlan(raw.plan, "manifest.plan");
   const planSha256 = sha256(raw.plan_sha256, "manifest.plan_sha256");
   const actualPlanSha256 = canonicalSha256(plan);
@@ -117,7 +149,7 @@ export function parseExperimentManifest(value: unknown): ExperimentManifest {
   for (let index = 0; index < raw.attempts.length; index += 1) {
     attempts.push(parseAttempt(raw.attempts[index], plan, planSha256, attempts, `manifest.attempts[${index}]`));
   }
-  return freezeManifest({ schema_version: 1, plan, plan_sha256: planSha256, attempts });
+  return freezeManifest({ schema_version: 2, plan, plan_sha256: planSha256, attempts });
 }
 
 /** Return a new frozen manifest with one validated outcome; the original manifest is unchanged. */
@@ -132,6 +164,7 @@ function parsePlan(value: unknown, at: string): ExperimentPlan {
   exactKeys(
     raw,
     [
+      "execution",
       "samples",
       "repetitions",
       "assignment_seed",
@@ -146,6 +179,8 @@ function parsePlan(value: unknown, at: string): ExperimentPlan {
     ],
     at,
   );
+
+  const execution = parseExecution(raw.execution, `${at}.execution`);
 
   if (!Array.isArray(raw.samples) || raw.samples.length === 0) fail(`${at}.samples`, "must be a non-empty array");
   const samples = raw.samples.map((sample, index) => parseSample(sample, `${at}.samples[${index}]`));
@@ -177,12 +212,14 @@ function parsePlan(value: unknown, at: string): ExperimentPlan {
   const budget = parseBudget(raw.budget, `${at}.budget`);
   const evaluator = parseEvaluator(raw.evaluator, `${at}.evaluator`);
   const metric = text(raw.metric, `${at}.metric`);
-  const aggregation = text(raw.aggregation, `${at}.aggregation`);
-  const uncertainty = text(raw.uncertainty, `${at}.uncertainty`);
-  const exclusionRules = stringList(raw.exclusion_rules, `${at}.exclusion_rules`);
+  if (raw.aggregation !== "macro_mean") fail(`${at}.aggregation`, 'must be exactly "macro_mean"');
+  if (raw.uncertainty !== "bootstrap_95_ci") fail(`${at}.uncertainty`, 'must be exactly "bootstrap_95_ci"');
+  const exclusionRules = identifierList(raw.exclusion_rules, `${at}.exclusion_rules`);
+  if (new Set(exclusionRules).size !== exclusionRules.length) fail(`${at}.exclusion_rules`, "must not contain duplicates");
   const retry = parseRetryRules(raw.retry, `${at}.retry`);
 
   return {
+    execution,
     samples,
     repetitions,
     assignment_seed: assignmentSeed,
@@ -190,25 +227,71 @@ function parsePlan(value: unknown, at: string): ExperimentPlan {
     budget,
     evaluator,
     metric,
-    aggregation,
-    uncertainty,
+    aggregation: "macro_mean",
+    uncertainty: "bootstrap_95_ci",
     exclusion_rules: exclusionRules,
     retry,
   };
 }
 
+function parseExecution(value: unknown, at: string): ExperimentExecution {
+  const raw = record(value, at);
+  exactKeys(
+    raw,
+    ["config_sha256", "loops", "artifact_dir", "artifact_packager", "harness", "resolved_model", "condition_policy_version"],
+    at,
+  );
+  const artifactDir = identifier(raw.artifact_dir, `${at}.artifact_dir`);
+  if (!isCanonicalArtifactSubdir(artifactDir)) {
+    fail(`${at}.artifact_dir`, "must be a canonical POSIX relative product path outside .hoh");
+  }
+  if (raw.artifact_packager !== EXPERIMENT_ARTIFACT_PACKAGER) {
+    fail(`${at}.artifact_packager`, `must be exactly ${JSON.stringify(EXPERIMENT_ARTIFACT_PACKAGER)}`);
+  }
+  const harnessRaw = record(raw.harness, `${at}.harness`);
+  exactKeys(harnessRaw, ["name", "version"], `${at}.harness`);
+  return {
+    config_sha256: sha256(raw.config_sha256, `${at}.config_sha256`),
+    loops: positiveSafeInteger(raw.loops, `${at}.loops`),
+    artifact_dir: artifactDir,
+    artifact_packager: EXPERIMENT_ARTIFACT_PACKAGER,
+    harness: {
+      name: identifier(harnessRaw.name, `${at}.harness.name`),
+      version: identifier(harnessRaw.version, `${at}.harness.version`),
+    },
+    resolved_model: identifier(raw.resolved_model, `${at}.resolved_model`),
+    condition_policy_version: identifier(raw.condition_policy_version, `${at}.condition_policy_version`),
+  };
+}
+
 function parseSample(value: unknown, at: string): ExperimentSample {
   const raw = record(value, at);
-  exactKeys(raw, ["task_id", "sample_id"], at);
-  return { task_id: identifier(raw.task_id, `${at}.task_id`), sample_id: identifier(raw.sample_id, `${at}.sample_id`) };
+  exactKeys(raw, ["task_id", "sample_id", "spec_sha256", "evaluator_task_sha256", "evaluator_sample_sha256", "a0"], at);
+  const a0Raw = record(raw.a0, `${at}.a0`);
+  exactKeys(a0Raw, ["workspace_tree_oid", "artifact_tree_oid"], `${at}.a0`);
+  return {
+    task_id: identifier(raw.task_id, `${at}.task_id`),
+    sample_id: identifier(raw.sample_id, `${at}.sample_id`),
+    spec_sha256: sha256(raw.spec_sha256, `${at}.spec_sha256`),
+    evaluator_task_sha256: sha256(raw.evaluator_task_sha256, `${at}.evaluator_task_sha256`),
+    evaluator_sample_sha256: sha256(raw.evaluator_sample_sha256, `${at}.evaluator_sample_sha256`),
+    a0: {
+      workspace_tree_oid: gitOid(a0Raw.workspace_tree_oid, `${at}.a0.workspace_tree_oid`),
+      artifact_tree_oid: gitOid(a0Raw.artifact_tree_oid, `${at}.a0.artifact_tree_oid`),
+    },
+  };
 }
 
 function parseCell(value: unknown, at: string): ExperimentCell {
   const raw = record(value, at);
-  exactKeys(raw, ["id", "condition"], at);
+  exactKeys(raw, ["id", "condition", "protocol_sha256"], at);
   const condition = text(raw.condition, `${at}.condition`);
   if (!CONDITIONS.has(condition)) fail(`${at}.condition`, `must be one of ${EXPERIMENT_CONDITIONS.join(", ")}`);
-  return { id: identifier(raw.id, `${at}.id`), condition: condition as ExperimentCondition };
+  return {
+    id: identifier(raw.id, `${at}.id`),
+    condition: condition as ExperimentCondition,
+    protocol_sha256: sha256(raw.protocol_sha256, `${at}.protocol_sha256`),
+  };
 }
 
 function parseBudget(value: unknown, at: string): ExperimentBudget {
@@ -227,12 +310,21 @@ function parseBudget(value: unknown, at: string): ExperimentBudget {
 function parseEvaluator(value: unknown, at: string): ExperimentEvaluator {
   const raw = record(value, at);
   exactKeys(raw, ["argv", "version", "rubric_sha256", "executable_sha256"], at);
-  if (!Array.isArray(raw.argv) || raw.argv.length === 0) fail(`${at}.argv`, "must be a non-empty argv array");
+  if (!Array.isArray(raw.argv) || raw.argv.length === 0 || raw.argv.length > EVALUATOR_LIMITS.argv_entries) {
+    fail(`${at}.argv`, `must contain 1-${EVALUATOR_LIMITS.argv_entries} entries`);
+  }
   const argv = raw.argv.map((argument, index) => argumentText(argument, `${at}.argv[${index}]`));
+  if (argv.reduce((total, argument) => total + Buffer.byteLength(argument), 0) > EVALUATOR_LIMITS.argv_bytes) {
+    fail(`${at}.argv`, `must not exceed ${EVALUATOR_LIMITS.argv_bytes} UTF-8 bytes`);
+  }
   if (!path.isAbsolute(argv[0])) fail(`${at}.argv[0]`, "must be an absolute executable path");
+  const version = text(raw.version, `${at}.version`);
+  if (Buffer.byteLength(version) > EVALUATOR_VERSION_BYTES) {
+    fail(`${at}.version`, `must not exceed ${EVALUATOR_VERSION_BYTES} UTF-8 bytes`);
+  }
   return {
     argv,
-    version: text(raw.version, `${at}.version`),
+    version,
     rubric_sha256: sha256(raw.rubric_sha256, `${at}.rubric_sha256`),
     executable_sha256: sha256(raw.executable_sha256, `${at}.executable_sha256`),
   };
@@ -267,6 +359,9 @@ function parseAttempt(
       "repetition",
       "retry",
       "run_receipt_sha256",
+      "condition_contract_sha256",
+      "protocol_receipt_sha256",
+      "evaluator_receipt_sha256",
       "status",
       "failure",
       "valid",
@@ -280,7 +375,8 @@ function parseAttempt(
   const attemptId = identifier(raw.attempt_id, `${at}.attempt_id`);
   if (priorAttempts.some((attempt) => attempt.attempt_id === attemptId)) fail(`${at}.attempt_id`, `duplicates ${JSON.stringify(attemptId)}`);
   const cellId = identifier(raw.cell_id, `${at}.cell_id`);
-  if (!plan.cells.some((cell) => cell.id === cellId)) fail(`${at}.cell_id`, `does not name a plan cell: ${JSON.stringify(cellId)}`);
+  const cell = plan.cells.find((candidate) => candidate.id === cellId);
+  if (!cell) fail(`${at}.cell_id`, `does not name a plan cell: ${JSON.stringify(cellId)}`);
   const taskId = identifier(raw.task_id, `${at}.task_id`);
   const sampleId = identifier(raw.sample_id, `${at}.sample_id`);
   if (!plan.samples.some((sample) => sample.task_id === taskId && sample.sample_id === sampleId)) {
@@ -316,6 +412,15 @@ function parseAttempt(
   }
 
   const runReceiptSha256 = sha256(raw.run_receipt_sha256, `${at}.run_receipt_sha256`);
+  const conditionContractSha256 = sha256(raw.condition_contract_sha256, `${at}.condition_contract_sha256`);
+  const protocolReceiptSha256 = sha256(raw.protocol_receipt_sha256, `${at}.protocol_receipt_sha256`);
+  if (protocolReceiptSha256 !== cell.protocol_sha256) {
+    fail(`${at}.protocol_receipt_sha256`, `must equal cell protocol_sha256 ${cell.protocol_sha256}`);
+  }
+  const evaluatorReceiptSha256 =
+    raw.evaluator_receipt_sha256 === null
+      ? null
+      : sha256(raw.evaluator_receipt_sha256, `${at}.evaluator_receipt_sha256`);
   const status = text(raw.status, `${at}.status`);
   if (!ATTEMPT_STATUSES.has(status)) fail(`${at}.status`, "must be completed, failed, or cancelled");
   const failure = raw.failure === null ? null : parseFailure(raw.failure, `${at}.failure`);
@@ -323,10 +428,22 @@ function parseAttempt(
   if (status !== "completed" && failure === null) fail(`${at}.failure`, `is required when status is ${status}`);
   if (typeof raw.valid !== "boolean") fail(`${at}.valid`, "must be a boolean");
   const valid = raw.valid;
-  const invalidReason = raw.invalid_reason === null ? null : text(raw.invalid_reason, `${at}.invalid_reason`);
+  const invalidReason = raw.invalid_reason === null ? null : identifier(raw.invalid_reason, `${at}.invalid_reason`);
   if (valid && invalidReason !== null) fail(`${at}.invalid_reason`, "must be null for a valid attempt");
   if (!valid && invalidReason === null) fail(`${at}.invalid_reason`, "is required for an invalid attempt");
   if (valid && status !== "completed") fail(`${at}.valid`, "only a completed attempt can be valid");
+  if (!valid && invalidReason !== null && !plan.exclusion_rules.includes(invalidReason)) {
+    fail(`${at}.invalid_reason`, `must exactly match a pre-registered exclusion rule: ${JSON.stringify(invalidReason)}`);
+  }
+  if (!valid && status !== "completed" && failure?.code !== invalidReason) {
+    fail(`${at}.invalid_reason`, "must equal failure.code for a failed or cancelled exclusion");
+  }
+  if (evaluatorReceiptSha256 === null && (status === "completed" || valid)) {
+    fail(`${at}.evaluator_receipt_sha256`, "is required for every completed or valid attempt");
+  }
+  if (evaluatorReceiptSha256 === null && (status !== "failed" && status !== "cancelled")) {
+    fail(`${at}.evaluator_receipt_sha256`, "may be null only for an excluded failed or cancelled pre-evaluation attempt");
+  }
 
   return {
     plan_sha256: attemptPlanSha256,
@@ -337,6 +454,9 @@ function parseAttempt(
     repetition,
     retry: { attempt: attemptNumber, retry_of: retryOf },
     run_receipt_sha256: runReceiptSha256,
+    condition_contract_sha256: conditionContractSha256,
+    protocol_receipt_sha256: protocolReceiptSha256,
+    evaluator_receipt_sha256: evaluatorReceiptSha256,
     status: status as ExperimentAttemptStatus,
     failure,
     valid,
@@ -384,6 +504,11 @@ function stringList(value: unknown, at: string): string[] {
   return value.map((item, index) => text(item, `${at}[${index}]`));
 }
 
+function identifierList(value: unknown, at: string): string[] {
+  if (!Array.isArray(value)) fail(at, "must be an array");
+  return value.map((item, index) => identifier(item, `${at}[${index}]`));
+}
+
 function positiveSafeInteger(value: unknown, at: string): number {
   if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 1) fail(at, "must be a positive safe integer");
   return value;
@@ -397,6 +522,28 @@ function nonNegativeSafeInteger(value: unknown, at: string): number {
 function sha256(value: unknown, at: string): string {
   if (typeof value !== "string" || !HEX_SHA256.test(value)) fail(at, "must be a lowercase 64-character SHA-256 hex digest");
   return value;
+}
+
+function gitOid(value: unknown, at: string): string {
+  if (typeof value !== "string" || !GIT_OID.test(value)) fail(at, "must be a full lowercase Git object ID");
+  return value;
+}
+
+function isCanonicalArtifactSubdir(value: string): boolean {
+  if (path.isAbsolute(value) || path.posix.isAbsolute(value) || path.win32.isAbsolute(value) || /[\\\0\r\n]/.test(value)) {
+    return false;
+  }
+  const normalized = path.posix.normalize(value);
+  return (
+    normalized === value &&
+    (value === "." || !value.endsWith("/")) &&
+    normalized !== ".." &&
+    !normalized.startsWith("../") &&
+    normalized !== ".hoh" &&
+    !normalized.startsWith(".hoh/") &&
+    normalized !== ".git" &&
+    !normalized.startsWith(".git/")
+  );
 }
 
 function freezeManifest(value: ExperimentManifest): ExperimentManifest {

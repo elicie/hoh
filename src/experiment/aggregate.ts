@@ -110,6 +110,12 @@ export function createRawExperimentResult(options: {
   const cell = manifest.plan.cells.find((candidate) => candidate.id === attempt.cell_id);
   if (!cell) fail(`manifest attempt ${JSON.stringify(attempt.attempt_id)} references an unknown cell`);
   const receiptSha256 = evaluatorReceiptSha256(options.evaluatorReceipt);
+  if (attempt.evaluator_receipt_sha256 === null) {
+    fail(`manifest attempt ${JSON.stringify(attempt.attempt_id)} is pre-evaluation and cannot have a raw evaluator result`);
+  }
+  if (receiptSha256 !== attempt.evaluator_receipt_sha256) {
+    fail("canonical evaluator receipt SHA-256 does not match the manifest attempt");
+  }
   const metricValue = extractMetric(manifest, attempt, options.evaluatorReceipt);
   const candidate: RawExperimentResult = {
     schema_version: 1,
@@ -210,6 +216,9 @@ export function parseRawExperimentResult(value: unknown, binding: RawExperimentR
     fail(
       `evaluator_receipt_sha256 does not match the canonical evaluator receipt (${recordedEvaluatorReceiptSha256} != ${actualEvaluatorReceiptSha256})`,
     );
+  }
+  if (attempt.evaluator_receipt_sha256 === null || recordedEvaluatorReceiptSha256 !== attempt.evaluator_receipt_sha256) {
+    fail("evaluator_receipt_sha256 does not match the manifest attempt");
   }
 
   const metricRaw = record(raw.metric, "metric");
@@ -637,10 +646,19 @@ function assertJsonValue(value: unknown, at: string): asserts value is JsonValue
 }
 
 function extractMetric(manifest: ExperimentManifest, attempt: ExperimentAttemptOutcome, receipt: EvaluatorReceipt): number | null {
-  assertEvaluatorIdentity(manifest, receipt);
+  assertEvaluatorIdentity(manifest, attempt, receipt);
+  if (attempt.status === "completed" && receipt.failure !== null) {
+    fail(`completed attempt ${JSON.stringify(attempt.attempt_id)} cannot use a failed evaluator receipt`);
+  }
+  if (attempt.status !== "completed" && receipt.failure === null) {
+    fail(`${attempt.status} attempt ${JSON.stringify(attempt.attempt_id)} cannot use a successful evaluator receipt`);
+  }
   if (receipt.failure !== null) {
     if (attempt.valid) fail(`valid attempt ${JSON.stringify(attempt.attempt_id)} cannot use a failed evaluator receipt`);
     if (receipt.result !== null) fail("failed evaluator receipt must have a null result");
+    if (attempt.failure?.code !== receipt.failure.code || attempt.invalid_reason !== receipt.failure.code) {
+      fail(`evaluator failure code does not match attempt failure and exclusion: ${JSON.stringify(receipt.failure.code)}`);
+    }
     return null;
   }
   const result = record(receipt.result, "evaluator receipt result");
@@ -653,7 +671,7 @@ function extractMetric(manifest: ExperimentManifest, attempt: ExperimentAttemptO
   return Object.is(metric, -0) ? 0 : metric;
 }
 
-function assertEvaluatorIdentity(manifest: ExperimentManifest, receipt: EvaluatorReceipt): void {
+function assertEvaluatorIdentity(manifest: ExperimentManifest, attempt: ExperimentAttemptOutcome, receipt: EvaluatorReceipt): void {
   if (!receipt || typeof receipt !== "object") fail("evaluator receipt must be an object");
   if (
     receipt.schema_version !== 1 ||
@@ -671,6 +689,16 @@ function assertEvaluatorIdentity(manifest: ExperimentManifest, receipt: Evaluato
     evaluator.executable_sha256 !== manifest.plan.evaluator.executable_sha256
   ) {
     fail("evaluator receipt identity does not match the pre-registered evaluator");
+  }
+  const sample = manifest.plan.samples.find(
+    (candidate) => candidate.task_id === attempt.task_id && candidate.sample_id === attempt.sample_id,
+  );
+  if (!sample) fail(`manifest attempt ${JSON.stringify(attempt.attempt_id)} does not identify a planned sample`);
+  if (
+    receipt.input.task_sha256 !== sample.evaluator_task_sha256 ||
+    receipt.input.sample_sha256 !== sample.evaluator_sample_sha256
+  ) {
+    fail("evaluator receipt task/sample hashes do not match the pre-registered sample inputs");
   }
   if (receipt.failure === null) {
     if (
@@ -701,7 +729,12 @@ function isPreRegisteredExclusion(manifest: ExperimentManifest, attempt: Experim
 }
 
 function mayOmitEvaluatorResult(manifest: ExperimentManifest, attempt: ExperimentAttemptOutcome): boolean {
-  return attempt.status !== "completed" && attempt.failure !== null && isPreRegisteredExclusion(manifest, attempt);
+  return (
+    attempt.evaluator_receipt_sha256 === null &&
+    attempt.status !== "completed" &&
+    attempt.failure !== null &&
+    isPreRegisteredExclusion(manifest, attempt)
+  );
 }
 
 function bootstrap95(values: readonly number[], seed: number): { lower: number; upper: number } {

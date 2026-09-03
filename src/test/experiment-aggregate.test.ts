@@ -31,18 +31,34 @@ const PRIVATE_EVALUATOR_TEXT = "PRIVATE_EVALUATOR_STDOUT_AND_STDERR_MUST_NOT_BE_
 function plan(options: { samples?: number; repetitions?: number; seed?: number } = {}): ExperimentPlan {
   const sampleCount = options.samples ?? 3;
   return {
+    execution: {
+      config_sha256: sha("experiment config"),
+      loops: 3,
+      artifact_dir: "game",
+      artifact_packager: "git-archive-tar-v1",
+      harness: { name: "codex", version: "codex-cli 1.2.3" },
+      resolved_model: "gpt-5.6-codex/high",
+      condition_policy_version: "arxiv:2609.01481v1/conditions-v1",
+    },
     samples: Array.from({ length: sampleCount }, (_, index) => ({
       task_id: "benchmark-task",
       sample_id: `sample-${index + 1}`,
+      spec_sha256: sha(`spec:${index + 1}`),
+      evaluator_task_sha256: sha(`evaluator-task:${index + 1}`),
+      evaluator_sample_sha256: sha(`evaluator-sample:${index + 1}`),
+      a0: {
+        workspace_tree_oid: `${index + 1}`.repeat(40),
+        artifact_tree_oid: `${index + 6}`.repeat(40),
+      },
     })),
     repetitions: options.repetitions ?? 2,
     assignment_seed: options.seed ?? 42,
     cells: [
-      { id: "cell-hoh", condition: "hoh" },
-      { id: "cell-vanilla", condition: "vanilla" },
-      { id: "cell-no-plan", condition: "no-plan-update" },
-      { id: "cell-no-evidence", condition: "no-evidence" },
-      { id: "cell-no-warm-start", condition: "no-warm-start" },
+      { id: "cell-hoh", condition: "hoh", protocol_sha256: sha("protocol:hoh") },
+      { id: "cell-vanilla", condition: "vanilla", protocol_sha256: sha("protocol:vanilla") },
+      { id: "cell-no-plan", condition: "no-plan-update", protocol_sha256: sha("protocol:no-plan-update") },
+      { id: "cell-no-evidence", condition: "no-evidence", protocol_sha256: sha("protocol:no-evidence") },
+      { id: "cell-no-warm-start", condition: "no-warm-start", protocol_sha256: sha("protocol:no-warm-start") },
     ],
     budget: { unit: "total_tokens", limit: 100_000 },
     evaluator: {
@@ -54,7 +70,7 @@ function plan(options: { samples?: number; repetitions?: number; seed?: number }
     metric: "task_success_rate",
     aggregation: "macro_mean",
     uncertainty: "bootstrap_95_ci",
-    exclusion_rules: ["infrastructure_failure"],
+    exclusion_rules: ["infrastructure_failure", "nonzero_exit"],
     retry: { max_attempts: 2, retryable_failure_codes: ["infrastructure_failure"] },
   };
 }
@@ -65,6 +81,7 @@ function completedManifest(planValue = plan()): ExperimentManifest {
     for (const sample of manifest.plan.samples) {
       for (let repetition = 1; repetition <= manifest.plan.repetitions; repetition += 1) {
         const attemptId = `${cell.id}-${sample.sample_id}-r${repetition}`;
+        const receipt = successfulReceipt(manifest.plan, cell.id, sample.task_id, sample.sample_id, repetition);
         manifest = addExperimentAttempt(manifest, {
           plan_sha256: manifest.plan_sha256,
           attempt_id: attemptId,
@@ -74,6 +91,9 @@ function completedManifest(planValue = plan()): ExperimentManifest {
           repetition,
           retry: { attempt: 1, retry_of: null },
           run_receipt_sha256: sha(`run:${attemptId}`),
+          condition_contract_sha256: sha(`condition:${attemptId}`),
+          protocol_receipt_sha256: cell.protocol_sha256,
+          evaluator_receipt_sha256: evaluatorReceiptSha256(receipt),
           status: "completed",
           failure: null,
           valid: true,
@@ -92,6 +112,7 @@ function manifestWithOneExcludedCoordinate(excludedStatus: "failed" | "completed
     const sample = manifest.plan.samples[0];
     const attemptId = `${cell.id}-${sample.sample_id}-r1`;
     const excluded = cell.condition === "hoh";
+    const completedReceipt = successfulReceipt(manifest.plan, cell.id, sample.task_id, sample.sample_id, 1);
     manifest = addExperimentAttempt(manifest, {
       plan_sha256: manifest.plan_sha256,
       attempt_id: attemptId,
@@ -101,6 +122,9 @@ function manifestWithOneExcludedCoordinate(excludedStatus: "failed" | "completed
       repetition: 1,
       retry: { attempt: 1, retry_of: null },
       run_receipt_sha256: sha(`run:${attemptId}`),
+      condition_contract_sha256: sha(`condition:${attemptId}`),
+      protocol_receipt_sha256: cell.protocol_sha256,
+      evaluator_receipt_sha256: excluded && excludedStatus === "failed" ? null : evaluatorReceiptSha256(completedReceipt),
       status: excluded ? excludedStatus : "completed",
       failure:
         excluded && excludedStatus === "failed"
@@ -113,7 +137,15 @@ function manifestWithOneExcludedCoordinate(excludedStatus: "failed" | "completed
   return manifest;
 }
 
-function evaluatorReceipt(planValue: ExperimentPlan, result: JsonValue | null, failed = false): EvaluatorReceipt {
+function evaluatorReceipt(
+  planValue: ExperimentPlan,
+  result: JsonValue | null,
+  failed = false,
+  inputHashes: { task: string; sample: string } = {
+    task: planValue.samples[0].evaluator_task_sha256,
+    sample: planValue.samples[0].evaluator_sample_sha256,
+  },
+): EvaluatorReceipt {
   const stdout = `${JSON.stringify(result)}\n`;
   const stderr = `${PRIVATE_EVALUATOR_TEXT}\n`;
   return {
@@ -139,9 +171,9 @@ function evaluatorReceipt(planValue: ExperimentPlan, result: JsonValue | null, f
       artifact_bytes: 8,
       artifact_sha256: sha("artifact"),
       task_bytes: 4,
-      task_sha256: sha("task"),
+      task_sha256: inputHashes.task,
       sample_bytes: 6,
-      sample_sha256: sha("sample"),
+      sample_sha256: inputHashes.sample,
     },
     process: {
       started_at: "2026-01-01T00:00:00.000Z",
@@ -157,6 +189,58 @@ function evaluatorReceipt(planValue: ExperimentPlan, result: JsonValue | null, f
   };
 }
 
+function successfulReceipt(
+  planValue: ExperimentPlan,
+  cellId: string,
+  taskId: string,
+  sampleId: string,
+  repetition: number,
+): EvaluatorReceipt {
+  const conditionIndex = planValue.cells.findIndex((cell) => cell.id === cellId);
+  const sampleIndex = planValue.samples.findIndex((sample) => sample.task_id === taskId && sample.sample_id === sampleId);
+  const sample = planValue.samples[sampleIndex];
+  const value = conditionIndex * 100 + sampleIndex * 10 + repetition;
+  return evaluatorReceipt(
+    planValue,
+    {
+      task_success_rate: value,
+      qa_pass: 1,
+      coverage: 100,
+      private_detail: PRIVATE_EVALUATOR_TEXT,
+    },
+    false,
+    { task: sample.evaluator_task_sha256, sample: sample.evaluator_sample_sha256 },
+  );
+}
+
+function manifestWithSingleCompletedAttempt(
+  planValue: ExperimentPlan,
+  receipt: EvaluatorReceipt,
+  receiptSha256 = evaluatorReceiptSha256(receipt),
+): ExperimentManifest {
+  let manifest = createExperimentManifest(planValue);
+  const cell = manifest.plan.cells[0];
+  const sample = manifest.plan.samples[0];
+  manifest = addExperimentAttempt(manifest, {
+    plan_sha256: manifest.plan_sha256,
+    attempt_id: "single-attempt",
+    cell_id: cell.id,
+    task_id: sample.task_id,
+    sample_id: sample.sample_id,
+    repetition: 1,
+    retry: { attempt: 1, retry_of: null },
+    run_receipt_sha256: sha("single run"),
+    condition_contract_sha256: sha("single condition"),
+    protocol_receipt_sha256: cell.protocol_sha256,
+    evaluator_receipt_sha256: receiptSha256,
+    status: "completed",
+    failure: null,
+    valid: true,
+    invalid_reason: null,
+  });
+  return manifest;
+}
+
 function dataset(manifest = completedManifest()): {
   manifest: ExperimentManifest;
   records: RawExperimentResult[];
@@ -165,19 +249,10 @@ function dataset(manifest = completedManifest()): {
   const records: RawExperimentResult[] = [];
   const sources: EvaluatorReceiptSource[] = [];
   for (const attempt of manifest.attempts) {
-    const conditionIndex = manifest.plan.cells.findIndex((cell) => cell.id === attempt.cell_id);
-    const sampleIndex = manifest.plan.samples.findIndex(
-      (sample) => sample.task_id === attempt.task_id && sample.sample_id === attempt.sample_id,
-    );
-    const value = conditionIndex * 100 + sampleIndex * 10 + attempt.repetition;
+    if (attempt.evaluator_receipt_sha256 === null) continue;
     const receipt =
       attempt.status === "completed"
-        ? evaluatorReceipt(manifest.plan, {
-            task_success_rate: value,
-            qa_pass: 1,
-            coverage: 100,
-            private_detail: PRIVATE_EVALUATOR_TEXT,
-          })
+        ? successfulReceipt(manifest.plan, attempt.cell_id, attempt.task_id, attempt.sample_id, attempt.repetition)
         : evaluatorReceipt(manifest.plan, null, true);
     const receiptPath = `receipts/${attempt.attempt_id}.json`;
     sources.push({ path: receiptPath, receipt });
@@ -194,14 +269,15 @@ function dataset(manifest = completedManifest()): {
 }
 
 test("raw results extract only the exact pre-registered finite numeric evaluator metric", () => {
-  const manifest = completedManifest(plan({ samples: 1, repetitions: 1 }));
-  const attempt = manifest.attempts[0];
-  const receipt = evaluatorReceipt(manifest.plan, {
+  const planValue = plan({ samples: 1, repetitions: 1 });
+  const receipt = evaluatorReceipt(planValue, {
     task_success_rate: 0.75,
     qa_pass: true,
     coverage: 99,
     ledger: PRIVATE_EVALUATOR_TEXT,
   });
+  const manifest = manifestWithSingleCompletedAttempt(planValue, receipt);
+  const attempt = manifest.attempts[0];
   const record = createRawExperimentResult({
     manifest,
     attemptId: attempt.attempt_id,
@@ -232,17 +308,53 @@ test("raw results extract only the exact pre-registered finite numeric evaluator
   ]);
   assert.doesNotMatch(JSON.stringify(record), /qa_pass|coverage|ledger|stdout|stderr|PRIVATE_EVALUATOR/);
 
+  const manifestHashMismatch = manifestWithSingleCompletedAttempt(planValue, receipt, sha("different evaluator receipt"));
+  assert.throws(
+    () =>
+      createRawExperimentResult({
+        manifest: manifestHashMismatch,
+        attemptId: manifestHashMismatch.attempts[0].attempt_id,
+        evaluatorReceipt: receipt,
+        evaluatorReceiptPath: "receipts/hash-mismatch.json",
+      }),
+    /canonical evaluator receipt SHA-256 does not match the manifest attempt/,
+  );
+
+  const wrongInputReceipt = evaluatorReceipt(
+    planValue,
+    { task_success_rate: 0.75 },
+    false,
+    { task: sha("wrong evaluator task"), sample: planValue.samples[0].evaluator_sample_sha256 },
+  );
+  const wrongInputManifest = manifestWithSingleCompletedAttempt(planValue, wrongInputReceipt);
+  assert.throws(
+    () =>
+      createRawExperimentResult({
+        manifest: wrongInputManifest,
+        attemptId: wrongInputManifest.attempts[0].attempt_id,
+        evaluatorReceipt: wrongInputReceipt,
+        evaluatorReceiptPath: "receipts/wrong-input.json",
+      }),
+    /task\/sample hashes do not match the pre-registered sample inputs/,
+  );
+
   for (const [label, result, error] of [
     ["missing", { Task_success_rate: 0.75 }, /missing exact metric field/],
     ["non-number", { task_success_rate: "0.75" }, /must be a number/],
     ["non-finite", { task_success_rate: Number.POSITIVE_INFINITY }, /non-finite|must be finite/],
   ] as const) {
+    const invalidReceipt = evaluatorReceipt(planValue, result as JsonValue);
+    const invalidManifest = manifestWithSingleCompletedAttempt(
+      planValue,
+      invalidReceipt,
+      label === "non-finite" ? sha("non-finite receipt placeholder") : evaluatorReceiptSha256(invalidReceipt),
+    );
     assert.throws(
       () =>
         createRawExperimentResult({
-          manifest,
-          attemptId: attempt.attempt_id,
-          evaluatorReceipt: evaluatorReceipt(manifest.plan, result as JsonValue),
+          manifest: invalidManifest,
+          attemptId: invalidManifest.attempts[0].attempt_id,
+          evaluatorReceipt: invalidReceipt,
           evaluatorReceiptPath: `receipts/${label}.json`,
         }),
       error,
@@ -363,6 +475,7 @@ test("canonical JSONL is strict, deterministic, and round-trips with receipt ver
 
 test("only exact pre-registered exclusions can explain invalid or missing results", () => {
   const planValue = plan({ samples: 1, repetitions: 1 });
+  const failedReceipt = evaluatorReceipt(planValue, null, true);
   let invalidManifest = createExperimentManifest(planValue);
   invalidManifest = addExperimentAttempt(invalidManifest, {
     plan_sha256: invalidManifest.plan_sha256,
@@ -373,12 +486,14 @@ test("only exact pre-registered exclusions can explain invalid or missing result
     repetition: 1,
     retry: { attempt: 1, retry_of: null },
     run_receipt_sha256: sha("excluded run"),
+    condition_contract_sha256: sha("excluded condition"),
+    protocol_receipt_sha256: planValue.cells[0].protocol_sha256,
+    evaluator_receipt_sha256: evaluatorReceiptSha256(failedReceipt),
     status: "failed",
-    failure: { code: "infrastructure_failure", message: "worker unavailable" },
+    failure: { code: "nonzero_exit", message: "external evaluator exited unsuccessfully" },
     valid: false,
-    invalid_reason: "infrastructure_failure",
+    invalid_reason: "nonzero_exit",
   });
-  const failedReceipt = evaluatorReceipt(planValue, null, true);
   const excluded = createRawExperimentResult({
     manifest: invalidManifest,
     attemptId: "excluded-attempt",
@@ -386,24 +501,75 @@ test("only exact pre-registered exclusions can explain invalid or missing result
     evaluatorReceiptPath: "receipts/excluded.json",
   });
   assert.equal(excluded.metric.value, null);
-  assert.equal(excluded.exclusion_rule, "infrastructure_failure");
+  assert.equal(excluded.exclusion_rule, "nonzero_exit");
 
-  let postHocManifest = createExperimentManifest(planValue);
-  postHocManifest = addExperimentAttempt(postHocManifest, {
+  let mismatchedFailure = createExperimentManifest(planValue);
+  mismatchedFailure = addExperimentAttempt(mismatchedFailure, {
     ...invalidManifest.attempts[0],
-    plan_sha256: postHocManifest.plan_sha256,
-    attempt_id: "post-hoc-exclusion",
-    invalid_reason: "looks_like_an_outlier",
+    plan_sha256: mismatchedFailure.plan_sha256,
+    attempt_id: "mismatched-evaluator-failure",
+    failure: { code: "infrastructure_failure", message: "different failure layer" },
+    invalid_reason: "infrastructure_failure",
   });
   assert.throws(
     () =>
       createRawExperimentResult({
-        manifest: postHocManifest,
-        attemptId: "post-hoc-exclusion",
+        manifest: mismatchedFailure,
+        attemptId: "mismatched-evaluator-failure",
         evaluatorReceipt: failedReceipt,
-        evaluatorReceiptPath: "receipts/post-hoc.json",
+        evaluatorReceiptPath: "receipts/mismatched-evaluator-failure.json",
       }),
-    /exclusion_rule is not pre-registered/,
+    /evaluator failure code does not match attempt failure and exclusion/,
+  );
+
+  const successfulReceiptForFailure = evaluatorReceipt(planValue, { task_success_rate: 0.1 });
+  let failedWithSuccess = createExperimentManifest(planValue);
+  failedWithSuccess = addExperimentAttempt(failedWithSuccess, {
+    ...invalidManifest.attempts[0],
+    plan_sha256: failedWithSuccess.plan_sha256,
+    attempt_id: "failed-with-successful-evaluator",
+    evaluator_receipt_sha256: evaluatorReceiptSha256(successfulReceiptForFailure),
+  });
+  assert.throws(
+    () =>
+      createRawExperimentResult({
+        manifest: failedWithSuccess,
+        attemptId: "failed-with-successful-evaluator",
+        evaluatorReceipt: successfulReceiptForFailure,
+        evaluatorReceiptPath: "receipts/failed-with-successful-evaluator.json",
+      }),
+    /failed attempt "failed-with-successful-evaluator" cannot use a successful evaluator receipt/,
+  );
+
+  let completedWithFailure = createExperimentManifest(planValue);
+  completedWithFailure = addExperimentAttempt(completedWithFailure, {
+    ...invalidManifest.attempts[0],
+    plan_sha256: completedWithFailure.plan_sha256,
+    attempt_id: "completed-with-failed-evaluator",
+    evaluator_receipt_sha256: evaluatorReceiptSha256(failedReceipt),
+    status: "completed",
+    failure: null,
+  });
+  assert.throws(
+    () =>
+      createRawExperimentResult({
+        manifest: completedWithFailure,
+        attemptId: "completed-with-failed-evaluator",
+        evaluatorReceipt: failedReceipt,
+        evaluatorReceiptPath: "receipts/completed-with-failed-evaluator.json",
+      }),
+    /completed attempt "completed-with-failed-evaluator" cannot use a failed evaluator receipt/,
+  );
+
+  assert.throws(
+    () =>
+      addExperimentAttempt(createExperimentManifest(planValue), {
+        ...invalidManifest.attempts[0],
+        plan_sha256: createExperimentManifest(planValue).plan_sha256,
+        attempt_id: "post-hoc-exclusion",
+        invalid_reason: "looks_like_an_outlier",
+      }),
+    /must exactly match a pre-registered exclusion rule/,
   );
 
   const complete = dataset(completedManifest(plan({ samples: 1, repetitions: 1 })));
@@ -508,11 +674,12 @@ test("aggregation API exposes no development-QA score fallback surface", () => {
     "uncertainty",
   ]);
 
-  const wrongAggregation = completedManifest({ ...plan({ samples: 1, repetitions: 1 }), aggregation: "median" });
-  assert.throws(() => aggregateExperimentResults(wrongAggregation, [], []), /aggregation must be exactly "macro_mean"/);
-  const wrongUncertainty = completedManifest({ ...plan({ samples: 1, repetitions: 1 }), uncertainty: "normal_95_ci" });
   assert.throws(
-    () => aggregateExperimentResults(wrongUncertainty, [], []),
+    () => completedManifest({ ...plan({ samples: 1, repetitions: 1 }), aggregation: "median" } as unknown as ExperimentPlan),
+    /aggregation must be exactly "macro_mean"/,
+  );
+  assert.throws(
+    () => completedManifest({ ...plan({ samples: 1, repetitions: 1 }), uncertainty: "normal_95_ci" } as unknown as ExperimentPlan),
     /uncertainty must be exactly "bootstrap_95_ci"/,
   );
 });
