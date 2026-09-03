@@ -1,253 +1,284 @@
 # HoH 개선 로드맵
 
-기준 시점: 2026-09-03. 근거는 1945 STRIKE 3루프 실행(`~/Dev/hoh-1945`, run `20260903-1de3ce`)에서 관찰한 것과 논문(arXiv 2609.01481) 본문·부록 A의 요구사항입니다. 각 항목은 **왜(관찰) → 무엇을 → 어떻게 → 검증 → 규모** 순으로 적었습니다. 규모는 한 사람 기준 대략치입니다.
+기준 시점: 2026-09-03
+
+이 문서는 현재 저장소의 구현 상태를 [arXiv:2609.01481v1](https://arxiv.org/abs/2609.01481v1)에 맞춰 다시 정리한 실행 로드맵이다. 프로젝트 사이트의 [Harness of Harness 초안 PDF](https://flesymeb.github.io/HarnessOfHarness/assets/paper/harness-of-harness.pdf)는 이전 설계 아이디어를 확인하는 보조 자료로만 사용한다. 공식 저장소의 구현은 아직 공개 예고 상태이므로, 이 프로젝트의 목표는 원본 코드와의 바이트 단위 호환이 아니라 논문에 기술된 동작 계약을 재현하는 것이다.
+
+## 해석 원칙
+
+1. **arXiv v1이 정본이다.** 두 문서가 다르면 arXiv v1의 알고리즘, 역할 계약, 실험 조건을 따른다.
+2. **논문 핵심과 로컬 확장을 구분한다.** 논문 재현에 필요한 동작과 운영 편의 기능을 같은 요구사항처럼 쓰지 않는다.
+3. **독립 QA는 다른 모델을 뜻하지 않는다.** 논문의 기본 실행은 같은 고정 하네스-모델 구성을 Planner, Developer, QA의 분리된 호출에 사용한다. 독립성은 역할별 컨텍스트·권한 분리, 후보 동결, 증거 기반 판정에서 나온다.
+4. **`C_t = Claims(S, D_t)`는 루프별 claim 집합이다.** 고정 PRD claim 카탈로그는 누락 방지를 위한 유용한 로컬 확장이지만 논문 자체의 필수 조건은 아니다. 자유 claim을 계속 허용한다.
+5. **외부 평가는 개발 루프와 격리한다.** 벤치마크 점수나 evaluator 결과가 다음 Planner, Developer, QA 입력으로 되돌아가면 실험 결과로 인정하지 않는다.
+
+## 분류와 상태
+
+분류:
+
+- **Core**: arXiv v1의 HoH 실행 계약을 재현하는 데 필요
+- **Full**: 논문 부록의 전체 시스템에 가까워지기 위한 기능
+- **Experiment**: 논문의 비교 실험과 ablation을 재현하는 기능
+- **Ops**: 장시간 실행을 안전하고 편하게 운영하기 위한 기능
+- **Extension**: 논문 밖의 프로젝트 고유 기능
+- **Draft**: 사이트 초안에만 있거나 arXiv v1과 다른 아이디어
+
+상태:
+
+- **완료**: 코드와 자동 검증이 모두 있음
+- **부분 완료**: 핵심 경로는 있으나 명시된 수용 기준이 남음
+- **대기**: 아직 구현하지 않음
+- **필요 시**: 실제 사용 사례가 생길 때만 진행
+
+우선순위는 P0가 다음 구현을 막는 계약, P1이 그 계약 직후의 Core·안정성 작업, P2가 실험·감사 완성도, P3가 실제 수요가 생길 때의 확장을 뜻한다.
+
+## 현재 판단
+
+현재 런타임은 세 역할의 분리 호출, 이전 후보 warm-start, QA용 동결 worktree, 구조화된 증거, 반복 원장, Git 이력, 재개를 이미 갖췄다. 즉 최소 HoH 루프는 작동한다. 다음 핵심 작업은 이미 끝난 기능을 다시 만드는 것이 아니라, **논문 모드의 고정 실행 계약을 명시적으로 강제하고 QA가 변경 후보를 더 정확히 검사하도록 만드는 것**이다.
 
 ## 우선순위 요약
 
-| # | 항목 | 우선순위 | 규모 | 의존 |
-| --- | --- | --- | --- | --- |
-| 1 | 증거 등급 강제 (소스만 보고 verified 금지) | P0 | 0.5일 | – |
-| 2 | PRD 커버리지 추적 (고정 claim 목록) | P0 | 1일 | 1 |
-| 3 | 증거 파일 보존 (`evidence/` 디렉토리와 해시) | P0 | 0.5일 | – |
-| 4 | Tester 모델 분리와 사람 체크포인트 | P0 | 0.5일 | – |
-| 5 | 저장소 정리: 커밋, CI, README 동기화 | P0 | 0.5일 | – |
-| 6 | Tester에 후보 diff 제공 | P1 | 0.2일 | – |
-| 7 | 장기 실행 운영: detach/stop/status, 예산, 재시도, 비용 | P1 | 2일 | – |
-| 8 | 원장 의미론 강화 (닫힘 조건, 에스컬레이션) | P1 | 0.5일 | 1, 2 |
-| 9 | 프롬프트 개선 (커버리지, 이전 diff, QA 리포트) | P1 | 0.5일 | 2, 6 |
-| 10 | 역할별 pi 확장·스킬 주입 | P1 | 1일 | – |
-| 11 | Developer 토큰 절감 | P2 | 0.5일 | – |
-| 12 | MCP 브리지 (외부 시스템이 필요한 프로젝트에 한해) | P2 | 1일 | 10 |
-| 13 | 컨테이너/샌드박스 실행 | P2 | 1일 | 7 |
-| 14 | 추가 하네스 어댑터 (codex, claude CLI) | P2 | 1일/개 | – |
-| 15 | 감사용 입력 해시와 receipt | P2 | 0.5일 | 3 |
-| 16 | 대시보드와 기록 확장 | P2 | 1일 | 3 |
-| 17 | 프로젝트 유형별 키트 템플릿 | P2 | 0.5일/개 | – |
-| 18 | 실험 프로토콜 (Vanilla 비교, 모델 비교) | P2 | 1일 | 4, 14 |
+| # | 항목 | 분류 | 상태 | 우선순위 | 예상 규모 | 의존 |
+| --- | --- | --- | --- | --- | --- | --- |
+| 1 | 실행 증거 등급 강제 | Core | 완료 | 유지 | – | – |
+| 2 | PRD 커버리지 카탈로그 | Extension | 완료 | 유지 | – | 1 |
+| 3 | 증거 파일 보존과 해시 | Core | 완료 | 유지 | – | – |
+| 4 | 논문 실행 계약 고정 | Core | 부분 완료 | P0 | 0.5일 | – |
+| 5 | 저장소·CI·문서 기준선 | Ops | 완료 | 유지 | – | – |
+| 6 | QA에 후보 diff 제공 | Core | 대기 | P1 | 0.25일 | – |
+| 7 | 장기 실행 제어·예산·재시도 | Ops | 부분 완료 | P1 | 1.5~2일 | 4 |
+| 8 | 원장 에스컬레이션 / 후보 복구 | Core / Draft | 부분 완료 | P1 | 0.5~1일 | 1, 2 |
+| 9 | 점진적 컨텍스트 노출과 프롬프트 정리 | Core | 부분 완료 | P1 | 0.5~1일 | 2; QA diff 연결은 6 |
+| 10 | 역할별 pi 확장·스킬 주입 | Full | 대기 | P1 | 1일 | 4 |
+| 11 | Developer 컨텍스트·토큰 절감 | Ops | 대기 | P2 | 0.5일 | 9 |
+| 12 | MCP 브리지 | Extension | 필요 시 | P3 | 1일 | 10 |
+| 13 | 샌드박스 실행 가이드 | Ops | 필요 시 | P3 | 1일 | 7 |
+| 14 | 추가 하네스 어댑터 | Experiment | 대기 | P2 | 1일/개 | 4 |
+| 15 | 입력 receipt와 무결성 검증 | Full | 부분 완료 | P2 | 0.5일 | 3, 4 |
+| 16 | 실행 리포트 확장 | Ops | 부분 완료 | P2 | 1일 | 3, 15 |
+| 17 | 프로젝트 유형별 검증 키트 | Extension | 부분 완료 | P3 | 0.5일/개 | – |
+| 18 | 대조군·ablation·외부 평가 프로토콜 | Experiment | 대기 | P2 | 1~2일 | 4, 14, 15 |
 
 ---
 
-## 1. 증거 등급 강제
+## 1. 실행 증거 등급 강제 — 완료
 
-**왜.** Loop 3 QA에서 `enemy_type_count`와 `pickup_medal_and_bomb_cap`이 `spawnEnemy`, `MAX_BOMBS` 소스를 읽은 것만으로 verified 처리됐다. 논문 3.4.3과 A.4는 "소스 존재만으로는 행동 검증이 아니다"라고 명시한다. 현재 `normalizeEvidence`는 레코드의 `execution_records[].type`을 보지 않는다.
+논문의 증거 기반 QA 계약에 맞춰, `verified` claim은 실행 계열 증거가 있어야 한다. 소스·설정·manifest만 인용한 레코드는 `insufficient_evidence` gap으로 강등하고 QA 상태를 다시 계산한다. 시각 claim의 screenshot 요구, 파일 존재와 해시 검증, 관련 회귀 테스트도 구현돼 있다.
 
-**무엇을.** verified 레코드마다 최소 하나의 **실행 계열 증거**를 요구한다. 없으면 gap(`insufficient_evidence`)으로 강등하고, QA 상태를 재계산한다.
+유지 조건:
 
-**어떻게.**
-- `src/runtime/schemas.ts`: `ExecutionRecordSchema.type`을 열거형으로 고정. 실행 계열 `run | test | check | screenshot | replay | runtime_trace | log | storage`, 정적 계열 `source | config | manifest`.
-- `src/runtime/loop.ts` `normalizeEvidence`: verified 레코드에 실행 계열이 하나도 없으면 `status: "gap"`, `severity: "minor"`, `runtime_notes`에 "source-only evidence downgraded" 기록. `claim_id`는 유지해 원장 연속성을 지킨다.
-- 시각 요구사항(HUD, 팔레트, 화면)은 `screenshot` 타입을 요구하는 규칙을 PRD 쪽 claim 정의(2번)에서 지정할 수 있게 한다.
-- Tester 프롬프트(`prompts/tester.system.md`)에 등급 규칙을 명시하고, `submit_evidence` 툴 설명에도 반영.
+- 실행 계열과 정적 계열 증거 타입의 구분을 깨지 않는다.
+- 새 evidence 타입을 추가할 때 어떤 계열인지 명시하고 테스트한다.
+- source-only 판정이 다시 `verified`를 만들지 못하도록 회귀 테스트를 유지한다.
 
-**검증.** `loop.test.ts`에 소스만 인용한 verified가 gap으로 강등되는 테스트, 실행 증거가 하나라도 있으면 유지되는 테스트. 1945 loop 3 evidence.json을 fixture로 넣어 강등 결과를 고정.
+## 2. PRD 커버리지 카탈로그 — 완료된 로컬 확장
 
-**규모.** 0.5일.
+고정 `claims.json`과 누적 `coverage.json`은 긴 실행에서 스펙 누락을 방지한다. Planner와 QA는 미검증·오래된 claim을 볼 수 있고, 상태는 `verified | gap | untested`로 추적된다.
 
-## 2. PRD 커버리지 추적
+논문과의 경계:
 
-**왜.** Tester는 그 루프의 acceptance gate와 preservation gate 위주로 본다. 보스 2페이즈, 스테이지 3 보스 강화, 무기 3단계의 시각 차이, 오디오 항목별 존재는 세 루프 동안 전용 claim이 한 번도 없었다. 그런데 원장이 비면 "완료"처럼 보이고, 다음 Planner는 PRD를 처음부터 다시 해석해야 한다. 논문 A.4의 `C_t = Claims(S, D_t)`는 스펙에서 파생한 고정 claim 집합이다.
+- 논문의 `C_t`를 전역 고정 집합으로 해석하지 않는다.
+- 카탈로그 밖의 자유 claim을 허용해 `Claims(S, D_t)`의 루프별 발견을 보존한다.
+- 카탈로그는 편의 기능이며, 없다고 해서 Core 실행을 막지 않는다.
 
-**무엇을.** PRD의 수용 기준을 **고정 claim 목록**으로 만들고, 매 루프 각 claim의 상태(`verified | gap | untested`)와 마지막 검증 루프를 기록한다. Planner와 Tester 모두 이 목록을 받는다.
+## 3. 증거 파일 보존과 해시 — 완료
 
-**어떻게.**
-- 형식: `<workspace>/.hoh/claims.json` (또는 PRD 옆 `claims.yaml`). 항목: `id`, `criterion`(PRD 문장), `requires`(`["run"]`, `["screenshot"]` 등 필요한 증거 타입), `weight`(선택).
-- 생성: `hoh init-claims --spec PRD.md`가 Planner 모델(또는 별도 모델)로 초안을 만들고 사용자가 편집. 실행 시작 시 없으면 자동 생성 후 커밋.
-- Tester: `submit_evidence`에 `coverage: { claim_id: status }`를 추가하거나, 레코드의 `claim_id`가 목록의 id와 일치하면 자동 매핑. 목록에 없는 새 claim은 허용(자유 claim).
-- 원장과 별개로 `coverage.json`을 갱신: claim별 `last_status`, `last_verified_loop`, `verified_count`.
-- README와 `hoh status`에 커버리지 표(verified n / untested m / gap k) 표시.
-- Planner 프롬프트에 "untested 또는 오래된(N루프 이상) claim" 섹션 추가(9번).
+루프별 `evidence/` 디렉터리, `HOH_EVIDENCE_DIR`, 검사 stdout/stderr 보존, 파일 크기 제한, 상대 경로와 SHA-256 기록이 구현돼 있다. 증거는 임시 디렉터리가 아니라 후보 이력과 함께 보존된다.
 
-**검증.** 모의 하네스로 2루프 돌려 untested → verified 전이와 `hoh status` 출력 확인. 강등 규칙(1번)과 결합 테스트.
+유지 조건:
 
-**규모.** 1일.
+- evidence 경로 탈출과 없는 파일 인용을 거부하거나 명시적으로 경고한다.
+- 파일 해시와 evidence record의 연결을 보존한다.
+- 대용량 증거가 저장소를 무제한 키우지 않도록 현재 상한을 유지한다.
 
-## 3. 증거 파일 보존
+## 4. 논문 실행 계약 고정 — 다음 Core 작업
 
-**왜.** Tester가 찍은 스크린샷과 playtest JSON이 전부 `/tmp`에 있어 실행이 끝나면 사라진다. evidence.json은 관찰 문장만 남는다. Fusepoint는 evidence packet 파일과 sha256으로 관찰을 후보에 묶는다.
+**문제.** 현재는 역할별 모델 override와 실행 중 설정 변경을 허용한다. 이는 제품 기능으로는 유용하지만, 논문의 고정 하네스-모델 구성과 고정 반복 예산 `T`를 재현한 실행인지 구별하기 어렵게 한다.
 
-**무엇을.** 루프별 증거 디렉토리를 만들고 도구 출력과 스크린샷을 거기에 남기며, 레코드가 그 파일을 경로와 해시로 인용하게 한다.
+**구현.** 설정에 실행 프로토콜을 명시한다.
 
-**어떻게.**
-- 런타임이 `HOH_EVIDENCE_DIR=<workspace>/.hoh/iterations/loop-NN/evidence/` 를 체크와 Tester 셸에 export. 체크 결과의 stdout/stderr 전체도 이 디렉토리에 파일로 저장(현재는 tail 4000자만).
-- Tester 프롬프트: 스크린샷과 실행 로그는 `$HOH_EVIDENCE_DIR`에 저장하고 `execution_records[].path`에 상대 경로로 인용하라고 지시.
-- `normalizeEvidence`: `path`가 evidence 디렉토리 안의 실제 파일이면 `sha256`을 계산해 레코드에 추가. 파일이 없으면 `runtime_notes`에 경고.
-- 이 디렉토리는 `.hoh` 아래라 tester 커밋에 포함된다. 용량 제한(예: 파일당 2MB, 루프당 30MB)을 두고 초과분은 목록만 남긴다.
-- playtest 도구: `--shot`/`--shots` 기본 경로를 `$HOH_EVIDENCE_DIR`로.
+```json
+{
+  "protocol": "paper"
+}
+```
 
-**검증.** 모의 Tester가 evidence 디렉토리에 파일을 쓰고 인용하면 해시가 붙고 커밋되는 테스트. 없는 파일 인용 시 경고 테스트.
+- `paper`: 세 역할의 base harness와 버전, provider/model ID, reasoning 설정은 같다. 역할별 prompt, 읽기·쓰기 권한, 도구·스킬 집합은 달라도 되지만 run 시작 시 고정된 role contract로 기록한다. 시작 시 정한 `T`와 이 계약은 실행 중 바꿀 수 없다.
+- `extended`: 역할별 모델, 사람 체크포인트, 기타 운영 확장을 허용한다. 결과에는 반드시 non-paper run으로 표시한다.
+- 실행 시작 시 harness/model/reasoning/role contract/tool policy/초기 `T`를 묶은 `protocol_sha256`을 기록한다.
+- resume 시 현재 설정과 receipt가 다르면 중단한다. 반복 수 연장은 같은 실행의 수정이 아니라 새 run 또는 명시적 fork로 기록한다.
+- QA의 독립성은 다른 모델이 아니라 새 세션, read-only 후보, 별도 QA worktree, 역할별 도구 제한으로 검사한다.
+- 기존 config에 `protocol`이 없으면 현재 동작을 보존하기 위해 `extended`로 해석하고 manifest에 legacy default를 남긴다. 새 문서와 예시는 `paper`를 명시한다.
 
-**규모.** 0.5일.
+**수용 기준.** 같은 구성의 `paper` run은 정상 실행된다. 모델·도구·`T`를 바꾼 resume은 거부된다. `extended` run은 허용되지만 manifest와 report에 명확히 표시된다. `protocol` 없는 기존 config는 `extended`와 legacy marker로 재현되고, 새 예시는 `paper`를 명시한다.
 
-## 4. Tester 모델 분리와 사람 체크포인트
+## 5. 저장소·CI·문서 기준선 — 완료
 
-**왜.** 이번 실행은 같은 gpt-5.5가 만들고 같은 gpt-5.5가 판정했다. QA PASS가 자기참조적이다. 논문은 벤치마크 평가를 개발 루프 밖에 두었고, Fusepoint에서는 사람이 플레이했다.
+런타임, PRD coverage, 재현 가능한 검증이 의미 단위 커밋으로 정리돼 있고 CI와 README, 예제가 현재 동작과 맞춰져 있다. 기준일 현재 `npm test` 결과는 48/48 통과다.
 
-**무엇을.** (a) Tester 모델을 다른 계열로 두는 것을 기본 권장으로 문서화하고 설정 예시를 제공. (b) N루프마다 사람 확인을 요구하는 체크포인트 기능.
+## 6. QA에 후보 diff 제공 — 다음 QA 정확도 작업
 
-**어떻게.**
-- 설정: `models.tester`는 이미 있음. `hoh.config.json` 예시를 `developer: gpt-5.5`, `tester: glm-5.3` 식으로 바꾸고 README에 이유를 적는다.
-- 체크포인트: `config.human_checkpoint: { every_loops: 3, timeout_min: 720 }`. 해당 루프 QA 후 런타임이 `.hoh/checkpoints/loop-NN.md`(플레이 방법, 확인할 claim 목록, 응답 양식)를 쓰고 대기. 사용자가 `hoh accept --loop N` 또는 `hoh reject --loop N --note "..."`로 응답하면 evidence에 `human_review` 레코드가 추가되고 원장에 반영된다. 타임아웃이면 기록만 남기고 진행.
-- 독립 평가 옵션: `config.evaluator: { model: "...", every_loops: N }`으로 별도 세션이 read-only로 PRD 대비 점수(루브릭 JSON)를 매기되, 결과는 개발 루프에 **주지 않고** `.hoh/evaluations/`에만 남긴다(논문의 격리 원칙).
+**문제.** QA는 Developer의 요약만으로 검사 범위를 추론한다. 후보의 실제 변경 지점을 모르면 white-box 검사가 넓고 얕아질 수 있다.
 
-**검증.** 모의 하네스로 체크포인트 대기와 accept/reject 흐름 테스트. 평가자 결과가 다음 Planner 프롬프트에 포함되지 않는지 테스트.
+**구현.** QA 입력 번들에 다음을 추가한다.
 
-**규모.** 0.5일(설정·문서) + 1일(체크포인트·평가자).
+- `git diff --stat <base>..<candidate> -- <artifact_dir>`
+- 크기 상한까지의 diff hunk와 변경 파일 목록
+- 상한을 넘으면 stat과 hunk header만 제공하고, QA가 read-only Git 명령으로 상세 diff를 열 수 있게 한다.
+- runtime-owned 파일과 `.hoh` 기록은 제품 후보 diff에서 제외한다.
 
-## 5. 저장소 정리
+**수용 기준.** 프롬프트 스냅샷에서 base/candidate가 정확하고 artifact 경계 밖 파일이 섞이지 않는다. 대형 diff도 입력 예산 상한을 넘지 않는다.
 
-**왜.** hoh 런타임 변경분(22개 테스트 통과)이 아직 커밋되지 않았고, 실행 중 고친 내용이 README에 일부만 반영돼 있다.
+## 7. 장기 실행 제어·예산·재시도 — 부분 완료
 
-**무엇을.**
-- 초기 커밋과 이후 변경을 의미 단위로 커밋(런타임, 설정, 프로바이더, 실행 중 수정).
-- `npm test`를 도는 CI(GitHub Actions) 추가. 가짜 OpenAI 서버 테스트는 네트워크 없이 돈다.
-- README에 `worktree_setup`, `HOH_*` 환경변수, 재개 동작, 후보 식별 범위(`artifact_dir`), 런타임 소유 파일 커밋 규칙을 반영(일부 반영됨, 검토 필요).
-- `examples/1945/`에 이번 PRD, 설정, tools를 키트로 복사(17번의 첫 항목).
-- `~/Dev/hoh/sample_game/`은 사용자 파일이므로 `.gitignore`에 넣거나 examples로 옮길지 사용자가 결정.
+재개와 상태 기록은 있으나 장시간 무인 실행을 위한 lifecycle 제어가 부족하다. 이 항목은 논문 알고리즘의 필수 조건이 아니라 운영 안정성 작업이다.
 
-**규모.** 0.5일.
+남은 작업:
 
-## 6. Tester에 후보 diff 제공
+- `run --detach`, PID·로그 기록, `stop`, `logs -f`, 현재 역할·경과 시간 표시
+- SIGTERM 시 진행 중 역할 종료와 임시 QA worktree 정리
+- 역할·루프·run 단위 토큰/비용/시간 예산과 `budget_exhausted` 종료 상태
+- transport timeout, 5xx, 연결 끊김에 한정한 역할 단위 재시도와 지수 backoff
+- 출력 정지 watchdog과 재시도 이력 보존
 
-**왜.** Tester는 Developer의 요약문만 받는다. 어디가 바뀌었는지 모르면 white-box 검사가 넓고 얕아진다.
+모델이 낸 QA 실패나 개발 결과를 전송 오류처럼 자동 재시도하지 않는다. 사람 체크포인트는 `extended` 프로토콜에서만 선택적으로 제공한다.
 
-**어떻게.** `renderTesterPrompts`에 `git diff --stat`과 상한(예: 400줄)까지의 `git diff base..candidate -- <artifact_dir>`를 넣는다. 초과 시 stat만 주고 "필요하면 `git diff` 직접 실행"을 안내. 큰 단일 파일은 hunk 헤더 위주로 요약.
+`paper` run이 예산을 소진한 뒤 resume할 때는 기존 한도 안의 미완료 시도만 이어갈 수 있다. `T`, 토큰, 비용 한도를 늘리려면 원 run을 보존한 새 run/fork로 기록한다.
 
-**검증.** 프롬프트 스냅샷 테스트.
+**수용 기준.** detach한 모의 run을 status/stop으로 제어할 수 있고, SIGTERM 뒤 고아 worktree가 남지 않는다. 가짜 provider의 일시적 503은 설정 횟수만큼 재시도하며, 예산 초과는 재개 가능한 명시적 상태로 끝난다.
 
-**규모.** 0.2일.
+## 8. 원장 에스컬레이션 / 후보 복구 — 부분 완료
 
-## 7. 장기 실행 운영
+실행 증거가 없는 claim은 닫히지 않고 원장 전이가 보존된다. coverage의 `verified | gap | untested`는 전체 PRD 관측 상태이고, ledger의 `open | closed | regressed`는 발견된 이슈의 수명주기다.
 
-**왜.** 이번 실행에서 detach, pid 관리, 중단·재개, 로그 감시를 전부 수동으로 했다. Bash 도구의 10분 제한에 걸려 죽은 적도 있다. 논문의 배포는 며칠 단위다.
+### 8A. 에스컬레이션 — Core
 
-**무엇을.**
-- `hoh run --detach`: `setsid`로 분리 실행, `.hoh/run.pid`와 `.hoh/run.log` 관리. `hoh stop`(SIGTERM 후 정리), `hoh logs -f`, `hoh status`에 현재 역할·경과 시간 표시.
-- 정상 종료 처리: SIGTERM 수신 시 진행 중 역할을 abort하고 worktree를 정리한 뒤 종료(현재는 kill 시 worktree가 남을 수 있음).
-- 예산 상한: `config.budget: { max_tokens_per_role, max_tokens_per_loop, max_tokens_per_run, max_cost_usd }`. 초과 시 해당 역할을 중단하고 error 대신 "budget_exhausted" 상태로 루프를 닫는다(Tester면 실패 evidence, Developer면 미커밋 변경을 되돌리고 후보 없음).
-- 재시도: 프로바이더 전송 오류(5xx, 타임아웃, 연결 끊김)에서 역할 단위 재시도 N회, 지수 백오프. 논문 B.2는 전송 오류 시 시도를 교체한다. pi의 `auto_retry` 이벤트를 transcript에 남기고, 그 이상은 런타임이 재실행.
-- 비용: 프로바이더 모델 설정에 `cost`(1M 토큰당 입력/출력/캐시 단가)를 넣으면 pi가 usage.cost를 채운다. 기본 설정 예시에 gpt-5.5 단가 자리 추가, README·status에 누적 비용 표시.
-- 워치독: 역할 타임아웃 외에 "출력 없이 N분" 감지(transcript 마지막 이벤트 시각).
+남은 작업:
 
-**검증.** detach/stop 통합 테스트(모의 하네스에 sleep 넣기), 예산 초과 시 상태 전이 테스트, 재시도 테스트(가짜 서버가 처음 두 번 503).
+- blocker는 다음 루프에서 즉시, 동일 gap이 2회 연속이면 상단 필수 항목으로 승격
+- 하나의 claim이 여러 관찰 행동을 뭉뚱그리지 않도록 QA 지침과 경고 추가
+- `open`, `closed`, `regressed`와 재개 후 상태 전이의 회귀 테스트 보강
 
-**규모.** 2일.
+### 8B. 후보 복구 — Draft, opt-in
 
-## 8. 원장 의미론 강화
+사이트 초안의 `A_{\pi_t}` 후보 계보 선택은 별도 확장으로만 고려한다. 최신 후보가 host-latched, 즉 런타임의 결정적 build/launch gate에서 다음 base로 사용할 수 없다고 고정 판정된 경우에만 이전 정상 후보를 선택할 수 있다. 모델 QA의 단순 실패만으로 자동 rollback하지 않으며, 선택한 base, 차단 근거, 보존한 branch를 모두 기록한다. 기본값은 arXiv v1처럼 직전 후보 `A_{t-1}`이다.
 
-**왜.** `full_prd_content_not_fully_validated`처럼 넓은 claim 하나가 여러 요구를 뭉뚱그려 열리고 닫혔다. 같은 id의 verified 레코드만 있으면 실행 증거 없이도 닫힌다.
+## 9. 점진적 컨텍스트 노출과 프롬프트 정리 — 부분 완료
 
-**무엇을.**
-- 닫힘 조건: 닫는 verified 레코드에 실행 계열 증거가 있어야 함(1번과 연동). 없으면 `fixed_pending_verify` 상태(Fusepoint의 상태)로 두고 다음 루프에 재검증 요구.
-- 에스컬레이션: `consecutive_gap_loops >= 2`인 이슈는 Planner 프롬프트 상단에 "반드시 다룰 것"으로 승격. blocker는 1루프부터.
-- 넓은 claim 억제: Tester 프롬프트에 "하나의 claim은 하나의 관찰 가능한 행동"을 명시하고, `claim` 문장이 여러 요구를 열거하면(예: 쉼표 3개 이상) 경고 노트.
-- 회귀 검증: 회귀(regressed)가 실제로 잡히는 테스트를 실제 모델로 한 번 재현(의도적으로 PRD 요구를 되돌리는 Developer 스크립트를 모의로).
+현재 역할 프롬프트에는 evidence와 coverage가 대부분 inline으로 들어간다. 작은 실행에는 단순하지만, 장기 실행에서는 컨텍스트가 누적되고 역할별 최소 정보 원칙이 약해진다.
 
-**규모.** 0.5일.
+남은 작업:
 
-## 9. 프롬프트 개선
+- 먼저 요약 index와 경로만 제공하고, 크기 임계값 이하에서만 전체 내용을 inline하는 progressive disclosure
+- Planner: 열린 gap, 오래된 claim, 직전 QA 결론 중심
+- Developer: 승인된 plan, 직전 gap의 권고, 이전 후보와 변경 경계 중심
+- QA: 스펙, plan, 후보 diff, 검증 도구, evidence 제출 계약 중심
+- 매 역할의 최종 system/user prompt snapshot과 입력 해시 보존
+- 외부 evaluator 결과가 세 역할 입력에 섞이지 않는 부정 테스트
 
-**왜.** 현재 프롬프트는 논문 A.2 템플릿을 옮긴 최소 버전이다. 실행에서 드러난 빈틈이 있다.
+**수용 기준.** 작은 fixture의 동작은 유지하면서 큰 evidence/coverage fixture의 prompt 크기가 상한 안에 들어온다. 역할별로 금지된 정보가 노출되지 않는다.
 
-**무엇을.**
-- Planner: 커버리지 표(2번)의 untested·오래된 claim 섹션, 에스컬레이션 이슈 섹션, 직전 Tester 리포트 전문 링크.
-- Developer: 직전 루프 diff stat과 QA gap의 `recommended_update`를 문서 상단에, "자체 검증 결과는 주장일 뿐"을 재강조, 증거 디렉토리 사용법(3번).
-- Tester: 증거 등급 규칙(1번), diff(6번), 증거 디렉토리(3번), "하나의 claim = 하나의 행동"(8번), 프로젝트별 검증 키트 사용법은 PRD의 "Verification tools" 절에서 자동 발췌.
-- 프롬프트 스냅샷 테스트를 두어 변경이 의도적인지 확인.
+## 10. 역할별 pi 확장·스킬 주입 — 대기
 
-**규모.** 0.5일.
+현재 pi 어댑터는 extensions와 skills를 끈 상태다. 논문의 역할별 하네스 구성 능력을 더 충실히 재현하려면 명시적 경로만 선택적으로 주입할 수 있어야 한다.
 
-## 10. 역할별 pi 확장·스킬 주입
+- 전역과 역할별 `extensions`, `skills` 설정
+- 경로 allowlist와 실행 manifest 기록
+- 확장이 등록한 도구에도 기존 역할별 tool allowlist 적용
+- Planner와 QA에 쓰기 도구가 노출되지 않는 통합 테스트
+- `paper` protocol에서도 역할별 도구·스킬은 허용하되, base harness/model/native capability는 같게 유지하고 각 역할의 집합과 버전을 run 시작 시 role contract로 고정
 
-**왜.** pi 어댑터가 `noExtensions`, `noSkills`로 프로젝트 자원을 전부 끈다. pi는 서브에이전트, 권한 게이트, 보호 경로, 샌드박스를 예제 확장으로 제공하고 MCP도 확장으로 붙이는 구조라, 이 통로가 없으면 아무것도 못 붙인다.
+## 11. Developer 컨텍스트·토큰 절감 — 대기
 
-**어떻게.**
-- 설정: `pi.extensions: string[]`, `pi.skills: string[]`, 역할별 override `pi.roles.<role>.{extensions,skills}`.
-- 어댑터: `DefaultResourceLoader`에 `additionalExtensionPaths`, `additionalSkillPaths`를 넘긴다. `noExtensions: true`와 병행 시 additional 경로가 로드되는지 pi 소스로 확인하고, 아니면 `extensionsOverride`로 직접 주입.
-- 안전: Planner와 Tester에 주입되는 확장이 쓰기 툴을 등록하면 allowlist가 막는지 테스트(툴 이름이 `tools` allowlist에 없으면 노출되지 않아야 함).
-- 예시: pi 동봉 `subagent`, `protected-paths`를 Developer에만 붙이는 설정 예제.
+- 큰 파일은 검색 후 부분 읽기를 우선하도록 지침 추가
+- 역할별 compaction 설정과 사용량 기록 노출
+- diff와 evidence의 inline 상한을 9번의 disclosure 정책과 공유
+- 최적화 전후의 prompt 크기와 토큰 사용량을 fixture로 비교
 
-**검증.** 가짜 서버 테스트에 확장 하나(커스텀 툴 등록)를 넣어 역할별로 툴 목록이 바뀌는지 확인.
+비용 절감 때문에 Developer가 스펙, 승인 plan, 열린 blocker를 보지 못하게 해서는 안 된다.
 
-**규모.** 1일.
+## 12. MCP 브리지 — 실제 요구가 생길 때만
 
-## 11. Developer 토큰 절감
+CLI나 프로젝트 도구로 표현할 수 없는 브라우저, DB, 외부 서비스가 실제 검증 요구로 등장할 때 pi extension을 통해 MCP 도구를 등록한다. 지금은 추상 브리지를 먼저 만들지 않는다. 역할별 allowlist, 자격 증명 경계, transcript 기록이 설계 전제다.
 
-**왜.** 40KB 단일 파일을 매 턴 재전송해 루프당 캐시 읽기 1.2~2.0M. 게이트웨이가 캐시를 지원해 과금은 덜하지만 컨텍스트 창을 빠르게 채운다.
+## 13. 샌드박스 실행 가이드 — 실제 운영 요구가 생길 때만
 
-**무엇을.**
-- Developer 프롬프트에 "큰 파일은 offset/limit으로 부분 읽기, grep으로 위치 찾기" 지침.
-- pi compaction 설정을 역할별로 노출(`pi.roles.developer.compaction`), 긴 세션에서 자동 요약.
-- 큰 파일 프로젝트에서는 PRD에 파일 분할을 허용하는 것도 선택지(이번 PRD는 단일 파일을 요구했음).
-- 역할별 thinking level 설정(`:medium`)으로 Developer 출력 토큰 조정 실험.
+장시간 또는 신뢰할 수 없는 입력을 실행할 때 필요한 격리 경계, workspace mount, secret 전달, 브라우저 의존성, 네트워크 정책을 문서화한다. Docker나 인프라 변경은 사용자의 해당 작업에 대한 명시적 승인과 프로젝트 인프라 지침 확인 없이는 실행하지 않는다.
 
-**규모.** 0.5일.
+## 14. 추가 하네스 어댑터 — 실험 준비
 
-## 12. MCP 브리지
+논문의 하네스 비교를 재현하려면 우선 Codex와 OpenCode 계열 어댑터를 대상으로 한다. Claude 등 논문 표에 없는 조합은 확장 실험으로 분리한다.
 
-**왜.** pi는 MCP를 내장하지 않는다. 브라우저 자동화, DB, 외부 API처럼 CLI로 감싸기 어려운 시스템을 다루는 프로젝트가 생기면 툴을 붙일 통로가 필요하다. 게임 엔진(Godot) 키트는 의도적으로 범위에서 뺀다. 웹 게임은 이번 키트로 충분하고, 엔진 프로젝트는 당장 계획이 없다.
+공통 계약:
 
-**무엇을.** pi 확장 하나로 MCP 서버(stdio)에 연결해 그 툴들을 `pi.registerTool`로 등록한다. 역할별 노출은 기존 allowlist가 담당한다. 우선은 pi 철학대로 CLI 스크립트 + PRD의 "Verification tools" 절로 해결하고, 그것으로 안 되는 시스템이 실제로 나타났을 때만 만든다.
+- 동일한 spec, `T`, 모델 조건, 역할 입력과 출력 schema
+- 비대화형 실행과 구조화 출력 복구
+- 역할별 도구 권한과 QA 후보 동결
+- usage, transcript, 실패 사유를 공통 receipt로 변환
 
-**규모.** 1일.
+어댑터 수를 늘리기 전에 하나의 대체 하네스로 end-to-end 실험 manifest가 재현되는지 먼저 검증한다.
 
-## 13. 컨테이너/샌드박스 실행
+## 15. 입력 receipt와 무결성 검증 — 부분 완료
 
-**왜.** 지금은 사용자 권한으로 bash가 그대로 돈다. 며칠 무인 실행이나 신뢰 못 하는 스펙에는 부적합하다. pi도 샌드박스를 제공하지 않는다.
+현재 candidate/spec/catalog/evidence 계열 해시가 일부 기록된다. 다음을 하나의 run receipt로 완성한다.
 
-**무엇을.** hoh 자체를 컨테이너 안에서 돌리는 것을 기본 운영 방식으로 문서화하고, 워크스페이스·`.env`·크롬 의존성을 담은 Dockerfile 예제를 제공. Docker 실행은 사용자가 명시적으로 결정할 사항이므로 런타임이 컨테이너를 자동 기동하지는 않는다.
+- 각 역할의 system+user 입력 해시
+- spec, development plan, config, protocol, candidate tree 해시
+- 역할별 resolved harness/model/reasoning/tool policy
+- evidence 파일 해시와 claim 연결
+- `hoh verify --workspace`의 불일치 보고
+- exact prompt는 메모리에서 해시하고, 저장 snapshot에는 credential·secret redaction을 적용해 redaction 여부를 기록
 
-**규모.** 1일.
+receipt는 비밀 값 자체를 저장하지 않고, 재현에 필요한 공개 설정과 해시만 보존한다.
 
-## 14. 추가 하네스 어댑터
+## 16. 실행 리포트 확장 — 부분 완료
 
-**왜.** 논문의 핵심 주장은 하네스 무관성이다. codex와 claude CLI가 이 머신에 있다. 어댑터가 있으면 같은 PRD로 하네스 비교가 가능하다.
+현재 루프 상태와 기본 기록 위에 다음 추세를 추가한다.
 
-**어떻게.** `Harness.invoke` 구현: CLI를 비대화 모드로 실행(`codex exec`, `claude -p`), 시스템 프롬프트와 사용자 프롬프트 전달, 툴 제한은 CLI 옵션으로 가능한 범위까지(불가능한 부분은 worktree 동결과 `.hoh` 가드가 담당), 구조화 출력은 툴 대신 최종 텍스트의 ```json 블록(`parseJsonBlock`이 이미 처리). usage는 CLI가 주는 범위에서.
+- 루프별 verified/gap/untested와 원장 전이
+- 역할별 시간·토큰·비용·재시도
+- protocol 종류와 receipt 검증 상태
+- evidence와 QA report의 상대 링크
 
-**규모.** 어댑터당 1일.
+정적 HTML은 실제로 여러 run을 비교할 필요가 생긴 뒤 추가한다. JSON run record, ledger, coverage를 정본으로 두고 CLI와 Markdown report는 여기서 생성되는 view로 유지한다.
 
-## 15. 감사용 입력 해시와 receipt
+## 17. 프로젝트 유형별 검증 키트 — 부분 완료된 확장
 
-**왜.** Fusepoint는 역할 입력 번들, 개발 문서, 후보 트리의 sha256을 receipt로 남겨 재현성과 감사를 보장한다. 지금은 후보 트리 해시만 있다.
+`examples/1945` 웹 게임 예제가 첫 검증 키트 역할을 한다. 다음 키트는 실제 프로젝트가 생길 때 `PRD + config + tools + checks`의 최소 묶음으로 추가한다. Node, Python, 웹 앱용 범용 플랫폼을 미리 만들지 않는다. 각 키트는 프로젝트 고유 도구가 저장소 밖 경로나 임시 상태에 의존하지 않는지 검증한다.
 
-**무엇을.** 각 역할 레코드에 `input_sha256`(system+user 프롬프트), `development_plan_sha256`, `spec_sha256`, `config_sha256`을 추가. evidence 레코드의 파일 인용에 해시(3번). `hoh verify --workspace`가 기록의 해시를 재계산해 불일치를 보고.
+## 18. 대조군·ablation·외부 평가 프로토콜 — 대기
 
-**규모.** 0.5일.
+논문과 같은 성능 주장을 하려면 런타임 기능보다 먼저 실험 격리를 보장해야 한다.
 
-## 16. 대시보드와 기록 확장
+필요 항목:
 
-**왜.** `.hoh/README.md`는 루프 표까지만 있다. 여러 실행을 비교하거나 추세를 보기 어렵다.
+- 동일 하네스·모델·스펙·예산의 Vanilla 연속 개발 대조군
+- `no-plan-update`, `no-evidence`, `no-warm-start` ablation
+- artifact 생성 전에 버전이 고정된 공식 benchmark evaluator 또는 독립 human rubric
+- scorer를 세 역할과 별도 프로세스로 실행하고, evaluator 입력에서 run label과 개발 중간 점수를 가리는 격리
+- seed, protocol receipt, 실패·재시도, 유효/무효 run 판정이 포함된 experiment manifest
+- 실행 전에 표본, 반복 횟수, 집계 방식, 불확실성 보고법을 고정한 분석 계획
+- 원시 결과와 집계 스크립트 보존
 
-**무엇을.** 루프별 verified/gap/원장 추세, 역할별 토큰·시간·비용, 커버리지 표를 README에 추가. 정적 HTML 대시보드(`hoh report --html`)로 스크린샷 썸네일과 tester 리포트 링크. 여러 워크스페이스를 한 화면에 모으는 `hoh report --all`.
-
-**규모.** 1일.
-
-## 17. 프로젝트 유형별 키트 템플릿
-
-**무엇을.** `examples/kits/<type>/`에 PRD 템플릿(Verification tools 절 포함), `hoh.config.json`, `tools/`, 체크 정의를 묶는다. 첫 항목은 이번 웹 게임 키트(playtest.mjs, syntax-check.mjs). 다음은 Node 라이브러리(테스트 스위트를 체크로), Python CLI(재구현 벤치마크용 diff 체크), 웹 앱(브라우저 E2E 체크). 게임 엔진 키트는 만들지 않는다.
-
-**규모.** 키트당 0.5일.
-
-## 18. 실험 프로토콜
-
-**왜.** 논문의 비교(Vanilla 연속 실행 대 HoH, 하네스·모델 간 비교, ablation)를 재현할 수단이 없다.
-
-**무엇을.**
-- `hoh vanilla --passes N`: 같은 하네스로 계획·QA 없이 N번 연속 개발 패스를 도는 대조군.
-- ablation 플래그: `--no-plan-update`(D_1 고정), `--no-evidence`(Planner에 E_{t-1} 미제공), `--no-warm-start`(매 루프 빈 워크스페이스).
-- 고정 루브릭 평가(4번 평가자)로 점수화, 결과를 `experiments/` 표로.
-
-**규모.** 1일.
+외부 ground truth가 없는 자체 QA PASS를 벤치마크 점수로 사용하지 않는다. 이 프로토콜과 evaluator 독립성이 완성되기 전에는 논문 대비 성능 향상 수치를 주장하지 않는다.
 
 ---
 
-## 논문 대비 아직 없는 것 (참고)
+## 완료 판정 기준
 
-- 역할별 툴·스킬의 **점진적 노출**(progressive exposure): 지금은 툴 allowlist만 고정. 10번 이후.
-- **phase 기반 quality plan**(Fusepoint의 criterion별 phase 체크): 2번 커버리지가 가벼운 버전.
-- **에셋 파이프라인**과 라이선스 추적: 범위 밖.
-- **벤치마크 어댑터**(GameCraft-Bench, FrontierSWE, ProgramBench): 18번 이후 필요 시.
+- **Core 완료**: 4, 6, 8A, 9가 자동 테스트와 함께 완료
+- **논문 전체 시스템에 근접**: Core에 10, 15가 추가 완료
+- **논문 실험 재현 가능**: 14의 최소 1개 대체 어댑터와 18이 완료되고 외부 평가 격리가 검증됨
+- **운영 완성도 향상**: 실제 장기 실행 필요에 맞춰 7, 11, 16을 선택적으로 완료
 
-## 권장 순서
+## 권장 진행 순서
 
-1 → 2 → 3 → 5를 먼저 끝내고(약 2.5일), 4번의 설정 변경만으로 Tester 모델을 바꿔 1945 PRD를 다시 돌린다. 그 결과가 이번 PASS의 독립 검증이 된다. 그다음 7번(운영)과 10번(확장 주입)을 하면 며칠짜리 무인 실행 준비가 된다.
+1. **4번**으로 paper/extended 실행을 구분하고 고정 계약을 잠근다.
+2. 서로 독립적인 **6번 후보 diff**와 **8A 에스컬레이션**을 병렬로 진행한다.
+3. **9번 progressive disclosure**를 적용한다. 기본 disclosure 작업은 6번과 병렬 착수할 수 있지만 QA diff 연결은 6번 계약이 끝난 뒤 합친다.
+4. **10번**으로 역할별 하네스 자원을 안전하게 노출한다.
+5. 실제 장기 run 전에 **7번**의 lifecycle·예산·재시도를 추가한다.
+6. 초안식 **8B 후보 복구**는 실제 결정적 회귀가 관찰될 때만 별도 opt-in으로 검증한다.
+7. 성능 비교가 필요해졌을 때만 **14번과 18번**을 묶어 실험한다.
+
+12, 13, 16, 17은 구체적인 사용 사례가 생기기 전에는 확장하지 않는다.
