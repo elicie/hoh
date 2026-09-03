@@ -10,14 +10,10 @@
 
 {{warm_start_section}}
 
-## Deterministic checks on the base candidate
-
-{{checks_section}}
-
 ## Development document (this iteration's brief)
 
-{{development_document}}
+{{development_document_section}}
 
 ## Public specification (PRD)
 
-{{spec}}
+{{spec_section}}

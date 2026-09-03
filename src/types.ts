@@ -238,6 +238,20 @@ export interface RoleUsage extends UsageTotals {
   model?: string;
 }
 
+/** Exact final role input delivered to the harness for one loop. */
+export interface RolePromptSnapshot {
+  schema_version: 1;
+  role: Role;
+  loop_index: number;
+  final_attempt: number;
+  system_prompt: string;
+  user_prompt: string;
+  system_prompt_sha256: string;
+  user_prompt_sha256: string;
+  combined_input_sha256: string;
+  created_at: string;
+}
+
 export interface RoleContractReceipt {
   workspace: "active-read-only" | "active-writer" | "isolated-read-only";
   builtin_tools: string[];

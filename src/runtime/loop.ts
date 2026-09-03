@@ -11,7 +11,7 @@
  * allowlists, isolated worktree, `.hoh/` guard), binds evidence to the tested
  * candidate (tree hash before/after), and records the resulting state.
  */
-import { copyFile, mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
+import { copyFile, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { randomBytes } from "node:crypto";
@@ -55,7 +55,14 @@ import {
   worktreeRemove,
 } from "./git.js";
 import { applyEvidence, emptyLedger } from "./ledger.js";
-import { renderDevelopmentDocument, renderDeveloperPrompts, renderPlannerPrompts, renderTesterPrompts } from "./prompts.js";
+import {
+  assertRolePromptWithinLimit,
+  renderDevelopmentDocument,
+  renderDeveloperPrompts,
+  renderPlannerPrompts,
+  renderTesterPrompts,
+} from "./prompts.js";
+import { buildPromptSnapshot } from "./prompt-snapshot.js";
 import { assertProtocolReceiptIntegrity, buildProtocolReceipt, hasExplicitProtocol } from "./protocol.js";
 import { renderRunReadme, renderTesterReport } from "./report.js";
 import { plannerTools, SUBMIT_EVIDENCE_TOOL, SUBMIT_PLAN_TOOL, testerTools } from "./schemas.js";
@@ -90,6 +97,8 @@ export interface RunResult {
   results: LoopResult[];
   ledger: Ledger;
 }
+
+const FAILED_TRANSCRIPT_CAPTURE = Symbol("hoh.failedTranscriptCapture");
 
 interface Ctx {
   ws: string;
@@ -294,10 +303,6 @@ export async function runLoop(ctx: Ctx, t: number): Promise<LoopResult> {
       SUBMIT_PLAN_TOOL,
     );
     const validated = validateOverlay(lastSubmission<PlannerOverlay>(plannerRun.result, SUBMIT_PLAN_TOOL) ?? parseJsonBlock<PlannerOverlay>(plannerRun.result.finalText));
-    if (!validated) {
-      throw new Error(`planner returned no development document after ${plannerRun.attempts} attempt(s)`);
-    }
-    overlay = validated;
     // The planner is read-only by tool allowlist; still assert nothing changed.
     const artifactSpec = [".", ":(exclude).hoh"];
     const plannerChanges = await pathsChanged(ws, artifactSpec);
@@ -305,6 +310,21 @@ export async function runLoop(ctx: Ctx, t: number): Promise<LoopResult> {
       log(`${tag} planner: WARNING workspace changed during planning (${plannerChanges.length} paths); reverting`);
       await restorePaths(ws, artifactSpec);
     }
+    await installCapturedTranscript(plannerRun.transcript);
+    await writeJson(
+      paths.promptSnapshot(t, "planner"),
+      buildPromptSnapshot({
+        role: "planner",
+        loopIndex: t,
+        finalAttempt: plannerRun.attempts,
+        systemPrompt: plannerPrompts.system,
+        userPrompt: plannerRun.finalUserPrompt,
+      }),
+    );
+    if (!validated) {
+      throw new Error(`planner returned no development document after ${plannerRun.attempts} attempt(s)`);
+    }
+    overlay = validated;
     planner = {
       ...overlay,
       schema_version: 1,
@@ -341,7 +361,7 @@ export async function runLoop(ctx: Ctx, t: number): Promise<LoopResult> {
     process.env.HOH_ROLE = "developer";
     const preDevelopmentCommit = await headCommit(ws);
     if (!preDevelopmentCommit) throw new Error(`cannot start Developer for loop ${t}: workspace has no base commit`);
-    const recordSpec = [".hoh", `:(exclude).hoh/iterations/loop-${pad(t)}/transcripts`];
+    const recordSpec = [".hoh"];
     // Anything already dirty under .hoh before the developer starts belongs to the runtime, not to the developer.
     const dirtyBefore = new Set(await pathsChanged(ws, recordSpec));
     log(`${tag} developer: start`);
@@ -355,7 +375,6 @@ export async function runLoop(ctx: Ctx, t: number): Promise<LoopResult> {
       developmentDocument,
       baseCandidateId,
       previousChangedPaths: previousDeveloper?.changed_paths ?? [],
-      previousChecks,
     });
     const developerRun = await invokeRole(ctx, {
       role: "developer",
@@ -377,7 +396,13 @@ export async function runLoop(ctx: Ctx, t: number): Promise<LoopResult> {
       await restorePaths(ws, hohChanges.map((p) => `:(literal)${p}`));
       log(`${tag} developer: WARNING reverted ${hohChanges.length} change(s) under .hoh/`);
     }
-    const commit = await commitAll(ws, `feat(loop-${pad(t)}): ${oneLine(overlay.objective)}`, ROLE_IDENTITY.developer, ["."]);
+    await installCapturedTranscript(developerRun.transcript);
+    // The harness writes the current transcript while the Developer runs, and
+    // a shell-enabled Developer can stage it (or any other runtime record).
+    // Keep all .hoh entries out of the candidate index; the runtime commits its
+    // own records at the later pre-QA boundary.
+    await git(["reset", "-q", "HEAD", "--", ".hoh"], ws, { allowFail: true });
+    const commit = await commitAll(ws, `feat(loop-${pad(t)}): ${oneLine(overlay.objective)}`, ROLE_IDENTITY.developer, [".", ":(exclude).hoh"]);
     const tree = await artifactTreeHash(ws, { subdir: artifactDir });
     const newCandidateId = `loop-${pad(t)}-${tree.slice(0, 12)}`;
     const candidateCommit = commit ?? preDevelopmentCommit;
@@ -397,6 +422,16 @@ export async function runLoop(ctx: Ctx, t: number): Promise<LoopResult> {
       created_at: new Date().toISOString(),
     };
     await writeJson(paths.developerJson(t), developer);
+    await writeJson(
+      paths.promptSnapshot(t, "developer"),
+      buildPromptSnapshot({
+        role: "developer",
+        loopIndex: t,
+        finalAttempt: developerRun.attempts,
+        systemPrompt: developerPrompts.system,
+        userPrompt: developerRun.finalUserPrompt,
+      }),
+    );
     log(`${tag} developer: done — candidate ${newCandidateId}, ${developer.changed_paths.length} path(s) changed${commit ? "" : " (no commit)"}`);
     }
     const candidateId = developer.candidate_id;
@@ -459,7 +494,13 @@ export async function runLoop(ctx: Ctx, t: number): Promise<LoopResult> {
         ws,
         `chore(loop-${pad(t)}): freeze deterministic check records`,
         RUNTIME_IDENTITY,
-        [paths.rel(paths.developerJson(t)), paths.rel(paths.transcript(t, "developer")), paths.rel(paths.checksJson(t)), paths.rel(evidenceDir)],
+        [
+          paths.rel(paths.developerJson(t)),
+          paths.rel(paths.promptSnapshot(t, "developer")),
+          paths.rel(paths.transcript(t, "developer")),
+          paths.rel(paths.checksJson(t)),
+          paths.rel(evidenceDir),
+        ],
       );
 
       log(`${tag} tester: start`);
@@ -471,10 +512,9 @@ export async function runLoop(ctx: Ctx, t: number): Promise<LoopResult> {
         candidateId,
         baseCandidateId,
         candidateDiff,
-        developerSummary: developer.summary,
         developmentDocument,
         checks,
-        ledger,
+        checksPath: paths.checksJson(t),
         claimCatalog: ctx.claimCatalog,
         coverage: ctx.coverage,
       });
@@ -504,10 +544,8 @@ export async function runLoop(ctx: Ctx, t: number): Promise<LoopResult> {
       }
       const evidenceRel = paths.rel(evidenceDir).replaceAll(path.sep, "/");
       const immutableCheckRel = `${evidenceRel}/checks/`;
-      const testerTranscriptRel = paths.rel(paths.transcript(t, "tester")).replaceAll(path.sep, "/");
       const testerRuntimeChanges = (await pathsChanged(ws, [".hoh"], { includeIgnored: true })).filter((changed) => {
         const rel = changed.replaceAll(path.sep, "/");
-        if (rel === testerTranscriptRel) return false;
         if (rel.startsWith(`${evidenceRel}/`) && !rel.startsWith(immutableCheckRel)) return false;
         return true;
       });
@@ -520,6 +558,17 @@ export async function runLoop(ctx: Ctx, t: number): Promise<LoopResult> {
         );
       }
       const testerViolations = [...testerWorkspaceChanges, ...testerRuntimeChanges];
+      await installCapturedTranscript(testerRun.transcript);
+      await writeJson(
+        paths.promptSnapshot(t, "tester"),
+        buildPromptSnapshot({
+          role: "tester",
+          loopIndex: t,
+          finalAttempt: testerRun.attempts,
+          systemPrompt: testerPrompts.system,
+          userPrompt: testerRun.finalUserPrompt,
+        }),
+      );
       const submission =
         lastSubmission<EvidenceSubmission>(testerRun.result, SUBMIT_EVIDENCE_TOOL) ?? parseJsonBlock<EvidenceSubmission>(testerRun.result.finalText);
       evidence = await bindEvidenceFiles(
@@ -573,6 +622,14 @@ export async function runLoop(ctx: Ctx, t: number): Promise<LoopResult> {
 
     return { loopIndex: t, planner, developer, evidence };
   } catch (err: any) {
+    const failedCapture = failedTranscriptCapture(err);
+    if (failedCapture) {
+      await restoreFailedRoleRuntimeWrites(ws, paths, t, process.env.HOH_ROLE, failedCapture);
+    }
+    // A failed shell-enabled role may have staged arbitrary workspace paths.
+    // Keep those working-tree changes available for a Developer retry, but
+    // clear the shared index so the runtime error commit can contain only .hoh.
+    await git(["reset", "-q", "HEAD", "--", "."], ws);
     const message = err?.stack ?? String(err);
     await writeJson(paths.errorJson(t), { loop_index: t, message: err?.message ?? String(err), stack: message, at: new Date().toISOString() });
     await writeText(paths.readme, await renderRunReadme(paths, run, await loadLedger(paths)));
@@ -590,37 +647,115 @@ interface InvokeOutcome {
   result: RoleResult;
   attempts: number;
   usage: RoleUsage;
+  /** Exact user prompt delivered on the final attempt, including any retry notice. */
+  finalUserPrompt: string;
+  transcript: TranscriptCapture | null;
 }
 
-async function invokeRole(ctx: Ctx, inv: RoleInvocation, requiredTool?: string): Promise<InvokeOutcome> {
+interface RuntimeRoleInvocation extends RoleInvocation {
+  /** Runtime destination; never forwarded to the role harness. */
+  transcriptPath?: string;
+}
+
+interface TranscriptCapture {
+  finalPath: string;
+  content: string;
+}
+
+async function invokeRole(ctx: Ctx, inv: RuntimeRoleInvocation, requiredTool?: string): Promise<InvokeOutcome> {
   const started = Date.now();
   const total: RoleUsage = { ...emptyUsage(), turns: 0, duration_ms: 0 };
   let attempts = 0;
   let result: RoleResult = { finalText: "", submissions: {}, usage: emptyUsage(), turns: 0 };
+  let finalUserPrompt = inv.prompt;
   const maxAttempts = requiredTool ? 2 : 1;
-  while (attempts < maxAttempts) {
-    attempts += 1;
-    const prompt =
-      attempts === 1
-        ? inv.prompt
-        : `${inv.prompt}\n\n## Runtime notice\n\nYour previous attempt ended without calling \`${requiredTool}\`. The runtime only accepts output delivered through that tool. Redo the work as needed and call \`${requiredTool}\` exactly once before finishing.`;
-    result = await ctx.harness.invoke({ ...inv, prompt });
-    if (ctx.run.protocol_receipt?.mode === "paper") {
-      const expected = ctx.run.protocol_receipt.models[inv.role];
-      if (!expected || result.model !== expected) {
-        throw new Error(
-          `paper protocol model mismatch for ${inv.role}: expected ${expected ?? "(none)"}, harness reported ${result.model ?? "(none)"}`,
-        );
+  const transcript = await beginTranscriptCapture(inv.transcriptPath);
+  const { transcriptPath: _transcriptPath, onTranscript: upstreamTranscript, ...harnessInvocation } = inv;
+  const onTranscript = (chunk: string) => {
+    if (transcript) transcript.content += chunk;
+    upstreamTranscript?.(chunk);
+  };
+  try {
+    while (attempts < maxAttempts) {
+      attempts += 1;
+      const prompt =
+        attempts === 1
+          ? inv.prompt
+          : `${inv.prompt}\n\n## Runtime notice\n\nYour previous attempt ended without calling \`${requiredTool}\`. The runtime only accepts output delivered through that tool. Redo the work as needed and call \`${requiredTool}\` exactly once before finishing.`;
+      assertRolePromptWithinLimit(inv.role, inv.systemPrompt, prompt);
+      finalUserPrompt = prompt;
+      result = await ctx.harness.invoke({ ...harnessInvocation, prompt, onTranscript });
+      if (ctx.run.protocol_receipt?.mode === "paper") {
+        const expected = ctx.run.protocol_receipt.models[inv.role];
+        if (!expected || result.model !== expected) {
+          throw new Error(
+            `paper protocol model mismatch for ${inv.role}: expected ${expected ?? "(none)"}, harness reported ${result.model ?? "(none)"}`,
+          );
+        }
       }
+      for (const k of ["input", "output", "cacheRead", "cacheWrite", "totalTokens", "cost"] as const) total[k] += result.usage[k] ?? 0;
+      total.turns += result.turns;
+      if (result.model) total.model = result.model;
+      if (!requiredTool || (result.submissions[requiredTool]?.length ?? 0) > 0 || parseJsonBlock(result.finalText)) break;
+      ctx.log(`[loop ${pad(inv.loopIndex)}] ${inv.role}: no ${requiredTool} call; retrying (${attempts}/${maxAttempts})`);
     }
-    for (const k of ["input", "output", "cacheRead", "cacheWrite", "totalTokens", "cost"] as const) total[k] += result.usage[k] ?? 0;
-    total.turns += result.turns;
-    if (result.model) total.model = result.model;
-    if (!requiredTool || (result.submissions[requiredTool]?.length ?? 0) > 0 || parseJsonBlock(result.finalText)) break;
-    ctx.log(`[loop ${pad(inv.loopIndex)}] ${inv.role}: no ${requiredTool} call; retrying (${attempts}/${maxAttempts})`);
+  } catch (error) {
+    const failure = error instanceof Error ? error : new Error(String(error));
+    if (transcript) Object.defineProperty(failure, FAILED_TRANSCRIPT_CAPTURE, { value: transcript });
+    throw failure;
   }
   total.duration_ms = Date.now() - started;
-  return { result, attempts, usage: total };
+  return { result, attempts, usage: total, finalUserPrompt, transcript };
+}
+
+async function beginTranscriptCapture(finalPath: string | undefined): Promise<TranscriptCapture | null> {
+  if (!finalPath) return null;
+  let content = "";
+  try {
+    content = await readFile(finalPath, "utf8");
+  } catch (error: any) {
+    if (error?.code !== "ENOENT") throw error;
+  }
+  return { finalPath, content };
+}
+
+async function installCapturedTranscript(capture: TranscriptCapture | null): Promise<void> {
+  if (!capture) return;
+  await mkdir(path.dirname(capture.finalPath), { recursive: true });
+  await rm(capture.finalPath, { force: true });
+  if (capture.content) await writeFile(capture.finalPath, capture.content);
+}
+
+function failedTranscriptCapture(error: unknown): TranscriptCapture | null {
+  if (!(error instanceof Error)) return null;
+  return ((error as Error & { [FAILED_TRANSCRIPT_CAPTURE]?: TranscriptCapture })[FAILED_TRANSCRIPT_CAPTURE] ?? null);
+}
+
+async function restoreFailedRoleRuntimeWrites(
+  workspace: string,
+  paths: RunPaths,
+  loopIndex: number,
+  role: string | undefined,
+  capture: TranscriptCapture,
+): Promise<void> {
+  if (role === "planner" || role === "tester") {
+    const workspaceChanges = await pathsChanged(workspace, [".", ":(exclude).hoh"]);
+    if (workspaceChanges.length) await restorePaths(workspace, [".", ":(exclude).hoh"]);
+  }
+  const evidenceRel = paths.rel(paths.evidenceDir(loopIndex)).replaceAll(path.sep, "/");
+  const immutableCheckRel = `${evidenceRel}/checks/`;
+  const unauthorized = (await pathsChanged(workspace, [".hoh"], { includeIgnored: true })).filter((changed) => {
+    const rel = changed.replaceAll(path.sep, "/");
+    return !(role === "tester" && rel.startsWith(`${evidenceRel}/`) && !rel.startsWith(immutableCheckRel));
+  });
+  if (unauthorized.length) {
+    await restorePaths(
+      workspace,
+      unauthorized.map((changed) => `:(literal)${changed}`),
+      { includeIgnored: true },
+    );
+  }
+  await installCapturedTranscript(capture);
 }
 
 function lastSubmission<T>(result: RoleResult, tool: string): T | null {

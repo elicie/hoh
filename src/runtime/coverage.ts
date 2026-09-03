@@ -195,6 +195,44 @@ export function renderCoverageTable(catalog: ClaimCatalog, coverage: CoverageSta
   return lines.join("\n");
 }
 
+/**
+ * Role-facing coverage index. Gaps come first, then claims never verified,
+ * followed by previously verified claims from stalest to most recent.
+ * Criteria stay in the canonical claim catalog and are only inlined by the
+ * disclosure layer when that complete view is small.
+ */
+export function renderCoveragePriorityIndex(catalog: ClaimCatalog, coverage: CoverageState): string {
+  const claims = [...catalog.claims].sort((a, b) => {
+    const aEntry = coverage.claims[a.id] ?? { last_status: "untested", last_verified_loop: null, verified_count: 0 };
+    const bEntry = coverage.claims[b.id] ?? { last_status: "untested", last_verified_loop: null, verified_count: 0 };
+    const aRank = coveragePriorityRank(aEntry);
+    const bRank = coveragePriorityRank(bEntry);
+    if (aRank !== bRank) return aRank - bRank;
+    if (aRank >= 2 && aEntry.last_verified_loop !== bEntry.last_verified_loop) {
+      return (aEntry.last_verified_loop ?? 0) - (bEntry.last_verified_loop ?? 0);
+    }
+    return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
+  });
+  const lines = [
+    "| Claim | Status | Requires | Last verified | Count | Weight | Priority |",
+    "| --- | --- | --- | --- | --- | --- | --- |",
+  ];
+  for (const claim of claims) {
+    const entry = coverage.claims[claim.id] ?? { last_status: "untested", last_verified_loop: null, verified_count: 0 };
+    const priority = entry.last_status === "gap" ? "gap" : entry.last_verified_loop === null ? "never-tested" : entry.last_status === "untested" ? "stale" : "recent";
+    lines.push(
+      `| \`${claim.id}\` | ${entry.last_status} | ${claim.requires.join(", ") || "any execution"} | ${entry.last_verified_loop ?? "-"} | ${entry.verified_count} | ${claim.weight ?? "-"} | ${priority} |`,
+    );
+  }
+  return lines.join("\n");
+}
+
+function coveragePriorityRank(entry: CoverageEntry): number {
+  if (entry.last_status === "gap") return 0;
+  if (entry.last_verified_loop === null) return 1;
+  return entry.last_status === "untested" ? 2 : 3;
+}
+
 function cell(value: string): string {
   return value.replace(/\|/g, "\\|").replace(/\s+/g, " ").trim();
 }

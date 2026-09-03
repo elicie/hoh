@@ -86,6 +86,12 @@ export class RunPaths {
   errorJson(i: number) {
     return path.join(this.loopDir(i), "error.json");
   }
+  promptsDir(i: number) {
+    return path.join(this.loopDir(i), "prompts");
+  }
+  promptSnapshot(i: number, role: Role) {
+    return path.join(this.promptsDir(i), `${role}.json`);
+  }
   transcript(i: number, role: Role) {
     return path.join(this.loopDir(i), "transcripts", `${role}.jsonl`);
   }

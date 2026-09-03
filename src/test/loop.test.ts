@@ -341,14 +341,16 @@ test("tester mutation of the frozen candidate is detected and discarded", async 
   }
 });
 
-test("developer changes under .hoh/ are reverted and recorded as violations", async () => {
+test("developer staged and unstaged changes under .hoh/ are reverted and recorded as violations", async () => {
   const { ws, spec, cleanup } = await makeWorkspace();
   try {
     const demo = createDemoMockHarness();
     const harness = new MockHarness({
       planner: (inv, api) => demo["scripts"].planner!(inv, api),
       developer: async (inv, api) => {
-        await api.write(".hoh/ledger.json", "{}");
+        await api.write(".hoh/ledger.json", '{"staged_tamper":true}');
+        await api.write(".hoh/iterations/loop-01/transcripts/developer.jsonl", "DEVELOPER_TRANSCRIPT_SENTINEL\n");
+        await git(["add", "--", ".hoh/ledger.json", ".hoh/iterations/loop-01/transcripts/developer.jsonl"], inv.cwd);
         await api.write(".hoh/injected.md", "tamper");
         return demo["scripts"].developer!(inv, api);
       },
@@ -356,11 +358,64 @@ test("developer changes under .hoh/ are reverted and recorded as violations", as
     });
     const result = await runHoh({ workspace: ws, specPath: spec, harness, config: { harness: "mock", loops: 1 } });
     const dev = result.results[0].developer;
-    assert.equal(dev.violations.length, 2);
+    assert.equal(dev.violations.length, 3);
+    assert.ok(dev.violations.some((violation) => violation.includes("transcripts/developer.jsonl")));
     assert.equal(await exists(path.join(ws, ".hoh", "injected.md")), false);
     const ledger = (await readJson<Ledger>(new RunPaths(ws).ledger))!;
     assert.equal(ledger.schema_version, 1);
     assert.ok(ledger.issues.result_state, "ledger survived the tamper attempt and recorded the loop-1 gap");
+    const candidateLedger = await git(["show", `${dev.candidate_commit_sha}:.hoh/ledger.json`], ws);
+    assert.doesNotMatch(candidateLedger.stdout, /staged_tamper/, "a staged runtime edit must not leak into the Developer candidate commit");
+    const candidateTranscript = await git(
+      ["cat-file", "-e", `${dev.candidate_commit_sha}:.hoh/iterations/loop-01/transcripts/developer.jsonl`],
+      ws,
+      { allowFail: true },
+    );
+    assert.notEqual(candidateTranscript.code, 0, "a pre-staged runtime transcript must not enter the Developer candidate commit");
+    assert.doesNotMatch(
+      await readFile(new RunPaths(ws).transcript(1, "developer"), "utf8"),
+      /DEVELOPER_TRANSCRIPT_SENTINEL/,
+      "the runtime must replace a forged role transcript with its isolated capture",
+    );
+  } finally {
+    await cleanup();
+  }
+});
+
+test("a failed developer cannot persist a forged runtime transcript", async () => {
+  const { ws, spec, cleanup } = await makeWorkspace();
+  try {
+    const demo = createDemoMockHarness();
+    const transcriptRel = ".hoh/iterations/loop-01/transcripts/developer.jsonl";
+    const sentinel = "FAILED_DEVELOPER_TRANSCRIPT_SENTINEL";
+    const harness = new MockHarness({
+      planner: (inv, api) => demo["scripts"].planner!(inv, api),
+      developer: async (inv, api) => {
+        await api.write("partial.txt", "developer work preserved across retry\n");
+        await api.write(transcriptRel, `${sentinel}\n`);
+        await git(["add", "--", "partial.txt", transcriptRel], inv.cwd);
+        throw new Error("developer failed after forging its transcript");
+      },
+    });
+
+    await assert.rejects(
+      runHoh({ workspace: ws, specPath: spec, harness, config: { harness: "mock", loops: 1 } }),
+      /developer failed after forging its transcript/,
+    );
+
+    const paths = new RunPaths(ws);
+    assert.equal(await exists(paths.transcript(1, "developer")), false);
+    const committedSentinel = await git(["grep", "-F", sentinel, "HEAD", "--", ".hoh"], ws, { allowFail: true });
+    assert.notEqual(committedSentinel.code, 0, "the runtime error commit must not preserve a forged Developer transcript");
+    assert.equal((await git(["status", "--porcelain", "--", ".hoh"], ws)).stdout.trim(), "");
+    assert.notEqual((await git(["cat-file", "-e", "HEAD:partial.txt"], ws, { allowFail: true })).code, 0, "runtime error commit must exclude staged candidate work");
+    assert.equal(await readFile(path.join(ws, "partial.txt"), "utf8"), "developer work preserved across retry\n");
+    assert.match((await git(["status", "--porcelain", "--", "partial.txt"], ws)).stdout, /^\?\? partial\.txt$/m);
+
+    const resumedHarness = createDemoMockHarness();
+    const resumed = await runHoh({ workspace: ws, harness: resumedHarness });
+    assert.ok(resumed.results[0].developer.changed_paths.includes("partial.txt"));
+    assert.match(resumedHarness.calls.find((call) => call.role === "tester")!.prompt, /partial\.txt/);
   } finally {
     await cleanup();
   }
@@ -670,6 +725,7 @@ test("tester changes to runtime-owned .hoh records are reverted and block QA", a
       tester: async (inv, api) => {
         // The Tester knows the main workspace path but may write only inside its evidence directory.
         await writeFile(path.join(ws, ".hoh", "pi-models.json"), JSON.stringify({ providers: {}, changed: Date.now() }));
+        await writeFile(path.join(ws, ".hoh", "iterations", "loop-01", "transcripts", "tester.jsonl"), "TESTER_TRANSCRIPT_SENTINEL\n");
         return demo["scripts"].tester!(inv, api);
       },
     });
@@ -678,6 +734,45 @@ test("tester changes to runtime-owned .hoh records are reverted and block QA", a
     assert.ok(e.gap_records.some((g) => g.claim_id === "runtime.workspace_mutated_by_tester"), JSON.stringify(e.gap_records.map((g) => g.claim_id)));
     assert.equal(e.qa_status, "fail");
     assert.equal(await exists(path.join(ws, ".hoh", "pi-models.json")), false);
+    assert.doesNotMatch(await readFile(new RunPaths(ws).transcript(1, "tester"), "utf8"), /TESTER_TRANSCRIPT_SENTINEL/);
+  } finally {
+    await cleanup();
+  }
+});
+
+test("a failed tester cannot persist a forged runtime transcript", async () => {
+  const { ws, spec, cleanup } = await makeWorkspace();
+  try {
+    const demo = createDemoMockHarness();
+    const { writeFile } = await import("node:fs/promises");
+    const transcriptRel = ".hoh/iterations/loop-01/transcripts/tester.jsonl";
+    const sentinel = "FAILED_TESTER_TRANSCRIPT_SENTINEL";
+    const harness = new MockHarness({
+      planner: (inv, api) => demo["scripts"].planner!(inv, api),
+      developer: (inv, api) => demo["scripts"].developer!(inv, api),
+      tester: async () => {
+        await writeFile(path.join(ws, "tester-staged-tamper.txt"), "staged\n");
+        await git(["add", "--", "tester-staged-tamper.txt"], ws);
+        await writeFile(path.join(ws, "tester-unstaged-tamper.txt"), "unstaged\n");
+        await writeFile(path.join(ws, transcriptRel), `${sentinel}\n`);
+        await git(["add", "--", transcriptRel], ws);
+        throw new Error("tester failed after forging its transcript");
+      },
+    });
+
+    await assert.rejects(
+      runHoh({ workspace: ws, specPath: spec, harness, config: { harness: "mock", loops: 1 } }),
+      /tester failed after forging its transcript/,
+    );
+
+    const paths = new RunPaths(ws);
+    assert.equal(await exists(paths.transcript(1, "tester")), false);
+    const committedSentinel = await git(["grep", "-F", sentinel, "HEAD", "--", ".hoh"], ws, { allowFail: true });
+    assert.notEqual(committedSentinel.code, 0, "the runtime error commit must not preserve a forged Tester transcript");
+    assert.equal(await exists(path.join(ws, "tester-staged-tamper.txt")), false);
+    assert.equal(await exists(path.join(ws, "tester-unstaged-tamper.txt")), false);
+    assert.notEqual((await git(["cat-file", "-e", "HEAD:tester-staged-tamper.txt"], ws, { allowFail: true })).code, 0);
+    assert.equal((await git(["status", "--porcelain"], ws)).stdout.trim(), "");
   } finally {
     await cleanup();
   }

@@ -139,7 +139,16 @@ export async function pathsChanged(dir: string, pathspec: string[], opts: { incl
 
 /** Discard every uncommitted change under `pathspec`. */
 export async function restorePaths(dir: string, pathspec: string[], opts: { includeIgnored?: boolean } = {}): Promise<void> {
-  await git(["checkout", "-q", "--", ...pathspec], dir, { allowFail: true });
+  // Reset the index first. `checkout -- <path>` alone copies a staged blob
+  // back into the working tree, so a role could otherwise stage a protected
+  // edit and let a later commit pick it up. Resolve the remaining tracked
+  // changes after the reset so unmatched untracked literals cannot make one
+  // combined checkout abort before restoring valid paths.
+  await git(["reset", "-q", "HEAD", "--", ...pathspec], dir, { allowFail: true });
+  const tracked = await git(["diff", "--name-only", "-z", "--", ...pathspec], dir, { allowFail: true });
+  for (const changed of tracked.stdout.split("\0").filter(Boolean)) {
+    await git(["checkout", "-q", "HEAD", "--", `:(literal)${changed}`], dir, { allowFail: true });
+  }
   await git(["clean", opts.includeIgnored ? "-fdxq" : "-fdq", "--", ...pathspec], dir, { allowFail: true });
 }
 

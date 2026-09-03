@@ -41,11 +41,31 @@ test("pi adapter: full loop through the real pi tool loop against a fake provide
         return { text: "Plan submitted." };
       case "developer":
         if (view.step === 0) return { tool: { name: "write", arguments: { path: "hello.txt", content: "hello from the fake developer\n" } } };
-        if (view.step === 1) return { tool: { name: "bash", arguments: { command: "cat hello.txt" } } };
+        if (view.step === 1) {
+          return {
+            tool: {
+              name: "bash",
+              arguments: {
+                command:
+                  "cat hello.txt; for f in \"${TMPDIR:-/tmp}\"/hoh-transcript-*/developer.jsonl; do test ! -e \"$f\" || printf 'PI_DEVELOPER_TRANSCRIPT_SENTINEL\\n' >> \"$f\"; done",
+              },
+            },
+          };
+        }
         return { text: "Wrote hello.txt and verified it with cat." };
       case "tester":
         if (view.step === 0) return { tool: { name: "edit", arguments: { path: "hello.txt", oldText: "hello", newText: "bye" } } };
-        if (view.step === 1) return { tool: { name: "bash", arguments: { command: "cat hello.txt && ls" } } };
+        if (view.step === 1) {
+          return {
+            tool: {
+              name: "bash",
+              arguments: {
+                command:
+                  "cat hello.txt && ls; for f in \"${TMPDIR:-/tmp}\"/hoh-transcript-*/tester.jsonl; do test ! -e \"$f\" || printf 'PI_TESTER_TRANSCRIPT_SENTINEL\\n' >> \"$f\"; done",
+              },
+            },
+          };
+        }
         if (view.step === 2) {
           return {
             tool: {
@@ -76,7 +96,11 @@ test("pi adapter: full loop through the real pi tool loop against a fake provide
 
   // Providers come from the hoh config (OpenAI-compatible endpoint + discovery), not from pi's models.json.
   const agentDir = path.join(path.dirname(ws), "pi-agent");
+  const roleTmpDir = path.join(path.dirname(ws), "role-visible-tmp");
   await mkdir(agentDir, { recursive: true });
+  await mkdir(roleTmpDir, { recursive: true });
+  const previousTmpDir = process.env.TMPDIR;
+  process.env.TMPDIR = roleTmpDir;
   process.env.FAKE_GATEWAY_KEY = "fake-key";
   const config = mergeConfig(DEFAULT_CONFIG, {
     harness: "pi",
@@ -143,7 +167,12 @@ test("pi adapter: full loop through the real pi tool loop against a fake provide
     const transcript = await readFile(paths.transcript(1, "developer"), "utf8");
     assert.match(transcript, /"type":"hoh_invocation"/);
     assert.match(transcript, /"type":"tool_execution_end"/);
+    assert.equal(transcript.split("\n").includes("PI_DEVELOPER_TRANSCRIPT_SENTINEL"), false);
+    const testerTranscript = await readFile(paths.transcript(1, "tester"), "utf8");
+    assert.equal(testerTranscript.split("\n").includes("PI_TESTER_TRANSCRIPT_SENTINEL"), false);
   } finally {
+    if (previousTmpDir === undefined) delete process.env.TMPDIR;
+    else process.env.TMPDIR = previousTmpDir;
     await server.close();
     await cleanup();
   }

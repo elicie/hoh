@@ -32,7 +32,8 @@ export interface RoleInvocation {
   prompt: string;
   tools: readonly BuiltinTool[];
   structuredTools: StructuredTool[];
-  transcriptPath?: string;
+  /** Trusted adapter events; the runtime keeps these bytes out of role-visible files until the role exits. */
+  onTranscript?: (chunk: string) => void;
   timeoutMs?: number;
   /** harness-specific model pattern for this role (from config); undefined = harness default */
   model?: string;

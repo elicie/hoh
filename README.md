@@ -55,6 +55,9 @@ to the exact candidate, and records every loop in git.
 - **Runtime records are off limits.** Developer changes under `.hoh/` are
   reverted. Tester writes are limited to the current loop's evidence directory;
   attempts to change other workspace or runtime records are reverted and fail QA.
+  Active role transcript events are buffered inside the harness process and
+  installed only after the corresponding mutation guard, so role-visible file
+  writes cannot forge the runtime's log.
 - **Structured output or nothing.** Planner and Tester deliver through tools
   with TypeBox schemas. A missing call is retried once with a runtime notice;
   a Planner that still returns nothing aborts the loop, a Tester that still
@@ -66,17 +69,28 @@ to the exact candidate, and records every loop in git.
 - **Fixed PRD coverage.** `.hoh/claims.json` keeps one stable claim per public
   acceptance criterion. `.hoh/coverage.json` records each claim as `verified`,
   `gap`, or `untested`, plus its last verified loop and verification count.
-  Planner and Tester prompts receive the full table; free claims remain allowed.
-  Evidence is bound to the catalog hash, so editing a claim makes its old
-  evidence ineligible until the revised claim is verified again.
+  Planner and Tester receive a priority index plus canonical paths, and the
+  exact table is inline only while it fits the context threshold; free claims
+  remain allowed. Evidence is bound to the catalog hash, so editing a claim
+  makes its old evidence ineligible until the revised claim is verified again.
 - **Issue ledger.** Gaps open issues, verified records close them, a gap on a
   closed issue marks a regression. Exact claim ids identify the same gap across
   loops. A blocker is mandatory in the next loop, as is a gap observed in two
   adjacent loops; these escalations appear before discretionary Planner work
   and at the top of the Developer document. Duplicate or replayed observations
-  count only once. Open issues are shown to every Planner and Tester. Loop
-  progress is measured by the ledger and deterministic checks, not only by QA
-  PASS (the Fusepoint trajectory has 2 PASS in 96 loops).
+  count only once. The Planner receives the bounded ledger view; mandatory and
+  open issues then travel in the development document seen by the
+  Developer and Tester. Loop progress is measured by the ledger and
+  deterministic checks, not only by QA PASS (the Fusepoint trajectory has 2
+  PASS in 96 loops).
+- **Progressive role context.** Long specification, evidence, ledger, coverage,
+  check, and development-document views are represented by canonical paths,
+  SHA-256, and a bounded index. Exact views up to 8 KiB remain inline; larger
+  views are read on demand. Every per-loop role system+user input, including a
+  retry notice, is limited to 96 KiB. Developer checks are carried once in the
+  development document, while QA receives the current plan, candidate diff,
+  current checks, coverage, and specification without the Developer's summary
+  or a duplicate standalone ledger.
 - **Environment for tools.** Every loop role invocation inherits
   `HOH_WORKSPACE` (the main workspace), `HOH_RUN_ID`, `HOH_LOOP`, and
   `HOH_ROLE` (the role name); roles that expose a shell can read them there.
@@ -110,6 +124,11 @@ to the exact candidate, and records every loop in git.
   `hoh-developer-bot`, and `hoh-tester-bot`. Before Tester access, a runtime
   `chore(loop-NN)` commit freezes the Developer record and deterministic check
   logs, so regenerated runtime files are not attributed to the next role.
+- **Prompt snapshots.** The exact final system and user input delivered to each
+  Planner, Developer, and Tester invocation in loops `1..T`, including the last
+  structured-output retry notice, is stored under the loop's `prompts/`
+  directory with per-input and combined SHA-256 values. The optional loop-0
+  claim-drafting call keeps its existing `claims-transcript.jsonl` record.
 
 ## Layout of a run (`<workspace>/.hoh/`)
 
@@ -128,6 +147,7 @@ iterations/loop-NN/
   checks.json               deterministic check results on the frozen candidate
   evidence.json             E_t
   evidence/                 hashed QA artifacts and retained check output
+  prompts/<role>.json       exact final system/user prompt snapshot and hashes
   tester_report.md          human-readable QA report
   transcripts/<role>.jsonl  pi session events (or mock records)
   error.json                present only when the loop aborted
@@ -279,6 +299,10 @@ npm test
   model discovery.
 - `coverage.test.ts`: fixed-claim initialization, cross-loop status transitions,
   required evidence types, prompt/report/status rendering, and `init-claims`.
+- `prompts.test.ts`: UTF-8 disclosure budgets, priority indexes, role-specific
+  context projection, canonical paths, and oversized-body omission.
+- `prompt-snapshot.test.ts`: exact final prompt hashes, retry capture, resume
+  behavior, candidate exclusion, and external-evaluator metadata non-mixing.
 - `evidence-files.test.ts`: durable Tester files, check output, SHA-256 binding,
   git inclusion, path boundaries, size limits, and runtime-record protection.
 - `pi-fake.test.ts`: the real pi SDK session and tool loop driven by a fake

@@ -8,9 +8,6 @@
 - Base candidate: `{{base_candidate}}`
 - Base Git commit: `{{base_commit_sha}}`
 - Candidate Git commit: `{{candidate_commit_sha}}`
-- Developer's own summary (a claim, not evidence):
-
-{{developer_summary}}
 
 ## Actual base-vs-candidate diff
 
@@ -33,7 +30,7 @@ If detail was omitted, or you need more context, run this exact read-only Git in
 
 ## Development document (this iteration's brief)
 
-{{development_document}}
+{{development_document_section}}
 
 ## Fixed PRD claim coverage
 
@@ -41,12 +38,8 @@ If detail was omitted, or you need more context, run this exact read-only Git in
 
 Assess every fixed claim that this iteration can reach. Reuse its exact id and satisfy all evidence types listed in `Requires`. Claims outside this catalog are allowed when they identify a new observable behavior.
 
-## Issue ledger (open and regressed issues)
-
-{{ledger_section}}
-
 ## Public specification
 
-{{spec}}
+{{spec_section}}
 
 Inspect and execute the candidate, then call `submit_evidence`.

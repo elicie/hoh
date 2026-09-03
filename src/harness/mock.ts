@@ -58,14 +58,9 @@ export class MockHarness implements Harness {
       },
     };
     const text = (await this.scripts[inv.role]?.(inv, api)) ?? "";
-    if (inv.transcriptPath) {
-      await mkdir(path.dirname(inv.transcriptPath), { recursive: true });
-      await writeFile(
-        inv.transcriptPath,
-        `${JSON.stringify({ ts: new Date().toISOString(), type: "mock_invocation", role: inv.role, loop: inv.loopIndex, systemPrompt: inv.systemPrompt, prompt: inv.prompt, finalText: text, submissions })}\n`,
-        { flag: "a" },
-      );
-    }
+    inv.onTranscript?.(
+      `${JSON.stringify({ ts: new Date().toISOString(), type: "mock_invocation", role: inv.role, loop: inv.loopIndex, systemPrompt: inv.systemPrompt, prompt: inv.prompt, finalText: text, submissions })}\n`,
+    );
     return { finalText: text, submissions, usage: emptyUsage(), turns: 1, model: inv.model ? `mock:${inv.model}` : "mock" };
   }
 }

@@ -1,4 +1,5 @@
 /** Model-assisted initialization of the fixed PRD claim catalog. */
+import { appendFile, mkdir } from "node:fs/promises";
 import type { Harness } from "../harness/types.js";
 import { READ_ONLY_TOOLS } from "../harness/types.js";
 import type { ClaimCatalog, CoverageState } from "../types.js";
@@ -33,18 +34,27 @@ export async function generateClaimCatalog(options: ClaimGenerationOptions): Pro
       attempt === 1
         ? prompts.user
         : `${prompts.user}\n\n## Runtime notice\n\nYour previous attempt did not produce a valid fixed claim catalog (${lastProblem}). Call \`${SUBMIT_CLAIMS_TOOL}\` exactly once with corrected claims.`;
-    const result = await options.harness.invoke({
-      role: "planner",
-      loopIndex: 0,
-      cwd: options.workspace,
-      systemPrompt: prompts.system,
-      prompt,
-      tools: READ_ONLY_TOOLS,
-      structuredTools: claimsTools,
-      transcriptPath: options.paths.claimsTranscript,
-      timeoutMs: options.timeoutMs,
-      model: options.model,
-    });
+    let transcript = "";
+    const result = await options.harness
+      .invoke({
+        role: "planner",
+        loopIndex: 0,
+        cwd: options.workspace,
+        systemPrompt: prompts.system,
+        prompt,
+        tools: READ_ONLY_TOOLS,
+        structuredTools: claimsTools,
+        onTranscript: (chunk) => {
+          transcript += chunk;
+        },
+        timeoutMs: options.timeoutMs,
+        model: options.model,
+      })
+      .finally(async () => {
+        if (!transcript) return;
+        await mkdir(options.paths.root, { recursive: true });
+        await appendFile(options.paths.claimsTranscript, transcript);
+      });
     if (options.expectedModel && result.model !== options.expectedModel) {
       throw new Error(
         `paper protocol model mismatch for planner claim initialization: expected ${options.expectedModel}, harness reported ${result.model ?? "(none)"}`,

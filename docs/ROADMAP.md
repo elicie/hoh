@@ -34,7 +34,7 @@
 
 ## 현재 판단
 
-현재 런타임은 세 역할의 분리 호출, 이전 후보 warm-start, QA용 동결 worktree, 실제 후보 diff, 구조화된 증거, 반복 gap 에스컬레이션, Git 이력, 재개와 논문 실행 계약 고정을 갖췄다. 다음 Core 작업은 **역할별 컨텍스트를 점진적으로 노출하고 프롬프트 입력을 줄이는 것**이다.
+현재 런타임은 세 역할의 분리 호출, 이전 후보 warm-start, QA용 동결 worktree, 실제 후보 diff, 구조화된 증거, 반복 gap 에스컬레이션, 점진적 역할 컨텍스트, Git 이력, 재개와 논문 실행 계약 고정을 갖췄다. 명시한 Core 계약은 완료됐고, 다음 논문 전체 시스템 작업은 **10번 역할별 pi 확장·스킬 주입**이다. 장기 실행 전에 필요한 운영 작업은 7번으로 별도 유지한다.
 
 ## 우선순위 요약
 
@@ -48,7 +48,7 @@
 | 6 | QA에 후보 diff 제공 | Core | 완료 | 유지 | – | – |
 | 7 | 장기 실행 제어·예산·재시도 | Ops | 부분 완료 | P1 | 1.5~2일 | 4 |
 | 8 | 원장 에스컬레이션 / 후보 복구 | Core / Draft | 8A 완료 / 8B 필요 시 | 유지 | – | 1, 2 |
-| 9 | 점진적 컨텍스트 노출과 프롬프트 정리 | Core | 부분 완료 | P1 | 0.5~1일 | 2; QA diff 연결은 6 |
+| 9 | 점진적 컨텍스트 노출과 프롬프트 정리 | Core | 완료 | 유지 | – | 2, 6 |
 | 10 | 역할별 pi 확장·스킬 주입 | Full | 대기 | P1 | 1일 | 4 |
 | 11 | Developer 컨텍스트·토큰 절감 | Ops | 대기 | P2 | 0.5일 | 9 |
 | 12 | MCP 브리지 | Extension | 필요 시 | P3 | 1일 | 10 |
@@ -115,7 +115,7 @@
 
 ## 5. 저장소·CI·문서 기준선 — 완료
 
-런타임, PRD coverage, 재현 가능한 검증이 의미 단위 커밋으로 정리돼 있고 CI와 README, 예제가 현재 동작과 맞춰져 있다. 기준일 현재 `npm test` 결과는 54/54 통과다.
+런타임, PRD coverage, 재현 가능한 검증이 의미 단위 커밋으로 정리돼 있고 CI와 README, 예제가 현재 동작과 맞춰져 있다. 기준일 현재 `npm test` 결과는 65/65 통과다.
 
 ## 6. QA에 후보 diff 제공 — 완료
 
@@ -165,20 +165,17 @@ Developer 전후의 전체 Git SHA를 candidate record에 고정하고, QA workt
 
 사이트 초안의 `A_{\pi_t}` 후보 계보 선택은 별도 확장으로만 고려한다. 최신 후보가 host-latched, 즉 런타임의 결정적 build/launch gate에서 다음 base로 사용할 수 없다고 고정 판정된 경우에만 이전 정상 후보를 선택할 수 있다. 모델 QA의 단순 실패만으로 자동 rollback하지 않으며, 선택한 base, 차단 근거, 보존한 branch를 모두 기록한다. 기본값은 arXiv v1처럼 직전 후보 `A_{t-1}`이다.
 
-## 9. 점진적 컨텍스트 노출과 프롬프트 정리 — 부분 완료
+## 9. 점진적 컨텍스트 노출과 프롬프트 정리 — 완료
 
-현재 역할 프롬프트에는 evidence와 coverage가 대부분 inline으로 들어간다. 작은 실행에는 단순하지만, 장기 실행에서는 컨텍스트가 누적되고 역할별 최소 정보 원칙이 약해진다.
+기존 `.hoh` 기록을 정본으로 유지하면서 `1..T`의 세 역할 입력을 path-first progressive disclosure로 바꿨다. 각 context block은 canonical path, exact view의 SHA-256, UTF-8 크기와 최대 4 KiB index를 먼저 제공한다. exact view는 8 KiB 이하에서만 inline하며, 실제 retry notice까지 포함한 최종 role system+user 입력은 합계 96 KiB를 넘기지 못한다. 이 수치는 논문이 정한 값이 아니라 재현 가능한 로컬 runtime policy다. PRD coverage를 만드는 선택적 loop-0 Planner 호출은 기존 `claims-transcript.jsonl` 계약을 유지한다.
 
-남은 작업:
-
-- 먼저 요약 index와 경로만 제공하고, 크기 임계값 이하에서만 전체 내용을 inline하는 progressive disclosure
-- Planner: 열린 gap, 오래된 claim, 직전 QA 결론 중심
-- Developer: 승인된 plan, 직전 gap의 권고, 이전 후보와 변경 경계 중심
-- QA: 스펙, plan, 후보 diff, 검증 도구, evidence 제출 계약 중심
-- 매 역할의 최종 system/user prompt snapshot과 입력 해시 보존
-- 외부 evaluator 결과가 세 역할 입력에 섞이지 않는 부정 테스트
-
-**수용 기준.** 작은 fixture의 동작은 유지하면서 큰 evidence/coverage fixture의 prompt 크기가 상한 안에 들어온다. 역할별로 금지된 정보가 노출되지 않는다.
+- Planner는 스펙, 직전 QA 결론·evidence, mandatory 우선 open ledger, `gap → never-tested → stale → recent` coverage index와 직전 check를 받는다.
+- Developer는 스펙, 승인된 development document, 이전 후보와 변경 경계만 받는다. base check는 development document 안의 단일 사본으로 전달한다.
+- QA는 스펙, development document, 6번의 후보 diff, 현재 deterministic check와 coverage를 받는다. 편향 가능한 Developer summary와 development document에 이미 반영된 standalone ledger는 중복 전달하지 않는다.
+- inline이 생략됐거나 index가 불충분하면 역할이 명시된 정본 파일을 읽도록 system contract가 요구한다.
+- 각 역할에 실제로 전달된 마지막 system/user prompt와 개별·결합 SHA-256을 `prompts/<role>.json`에 보존한다. structured-output retry의 runtime notice도 포함한다.
+- 큰 다국어 fixture의 byte 상한, omitted-body sentinel, 역할별 금지 입력, retry snapshot, mid-loop resume, 후보 commit에서 runtime snapshot 제외, 하네스 프로세스 내부 transcript buffering을 자동 테스트한다.
+- 이전 record에 임의 `external_evaluator` metadata를 넣어도 다음 세 역할의 렌더링 prompt와 snapshot에는 섞이지 않는 부정 테스트가 있다. evaluator 파일·프로세스 자체를 workspace 밖에 두는 완전한 실험 격리는 18번 범위다.
 
 ## 10. 역할별 pi 확장·스킬 주입 — 대기
 
@@ -222,9 +219,9 @@ CLI나 프로젝트 도구로 표현할 수 없는 브라우저, DB, 외부 서�
 
 ## 15. 입력 receipt와 무결성 검증 — 부분 완료
 
-현재 candidate/spec/catalog/evidence 계열 해시와 protocol/config/role-contract receipt가 기록되고, protocol receipt는 resume 시 자체 해시를 검산한다. 다음을 하나의 run receipt와 독립 검증 명령으로 완성한다.
+현재 candidate/spec/catalog/evidence 계열 해시, protocol/config/role-contract receipt, 역할별 최종 prompt snapshot과 입력 해시가 기록되고, protocol receipt는 resume 시 자체 해시를 검산한다. 다음을 하나의 run receipt와 독립 검증 명령으로 완성한다.
 
-- 각 역할의 system+user 입력 해시
+- 역할별 prompt snapshot hash를 candidate·plan·evidence와 연결한 receipt
 - spec, development plan, config, protocol, candidate tree 해시
 - 역할별 resolved harness/model/reasoning/tool policy
 - evidence 파일 해시와 claim 연결
@@ -268,17 +265,16 @@ receipt는 비밀 값 자체를 저장하지 않고, 재현에 필요한 공개 
 
 ## 완료 판정 기준
 
-- **Core 완료**: 4, 6, 8A, 9가 자동 테스트와 함께 완료
+- **Core 완료**: 4, 6, 8A, 9가 자동 테스트와 함께 완료됨
 - **논문 전체 시스템에 근접**: Core에 10, 15가 추가 완료
 - **논문 실험 재현 가능**: 14의 최소 1개 대체 어댑터와 18이 완료되고 외부 평가 격리가 검증됨
 - **운영 완성도 향상**: 실제 장기 실행 필요에 맞춰 7, 11, 16을 선택적으로 완료
 
 ## 권장 진행 순서
 
-1. **9번 progressive disclosure**를 적용해 역할별 입력을 줄인다. QA는 완료된 6번 diff 계약을 사용한다.
-2. **10번**으로 역할별 하네스 자원을 안전하게 노출한다.
-3. 실제 장기 run 전에 **7번**의 lifecycle·예산·재시도를 추가한다.
-4. 초안식 **8B 후보 복구**는 실제 결정적 회귀가 관찰될 때만 별도 opt-in으로 검증한다.
-5. 성능 비교가 필요해졌을 때만 **14번과 18번**을 묶어 실험한다.
+1. **10번**으로 역할별 하네스 자원을 안전하게 노출한다.
+2. 실제 장기 run 전에 **7번**의 lifecycle·예산·재시도를 추가한다.
+3. 초안식 **8B 후보 복구**는 실제 결정적 회귀가 관찰될 때만 별도 opt-in으로 검증한다.
+4. 성능 비교가 필요해졌을 때만 **14번과 18번**을 묶어 실험한다.
 
 12, 13, 16, 17은 구체적인 사용 사례가 생기기 전에는 확장하지 않는다.

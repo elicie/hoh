@@ -15,7 +15,7 @@ Items under **Mandatory next-loop issues** are runtime escalations. Put them bef
 
 ## Public specification (source of truth)
 
-{{spec}}
+{{spec_section}}
 
 ## Fixed PRD claim coverage
 

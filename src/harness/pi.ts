@@ -138,19 +138,13 @@ export class PiHarness implements Harness {
     let finalText = "";
     let lastError: string | undefined;
     let lastStop: string | undefined;
-    let out: fs.WriteStream | undefined;
-    if (inv.transcriptPath) {
-      fs.mkdirSync(path.dirname(inv.transcriptPath), { recursive: true });
-      out = fs.createWriteStream(inv.transcriptPath, { flags: "a" });
-      out.on("error", (err) => process.stderr.write(`hoh: transcript write failed: ${err.message}\n`));
-    }
-    out?.write(
+    inv.onTranscript?.(
       `${JSON.stringify({ ts: new Date().toISOString(), type: "hoh_invocation", role: inv.role, loop: inv.loopIndex, cwd: inv.cwd, tools: [...inv.tools, ...inv.structuredTools.map((t) => t.name)], model: usedModel })}\n`,
     );
 
     const unsubscribe = session.subscribe((event: any) => {
       if (event.type === "message_update") return;
-      out?.write(`${JSON.stringify({ ts: new Date().toISOString(), ...event }, truncate)}\n`);
+      inv.onTranscript?.(`${JSON.stringify({ ts: new Date().toISOString(), ...event }, truncate)}\n`);
       if (event.type === "turn_end") turns += 1;
       if (event.type === "message_end" && event.message?.role === "assistant") {
         const m = event.message;
@@ -180,7 +174,6 @@ export class PiHarness implements Harness {
     } finally {
       unsubscribe();
       session.dispose();
-      out?.end();
     }
 
     if (lastStop === "error") {
