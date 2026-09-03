@@ -34,7 +34,7 @@
 
 ## 현재 판단
 
-현재 런타임은 세 역할의 분리 호출, 이전 후보 warm-start, QA용 동결 worktree, 실제 후보 diff, 구조화된 증거, 반복 gap 에스컬레이션, 점진적 역할 컨텍스트, 역할별 pi 자원·compaction 정책, Git 이력, 재개와 논문 실행 계약 고정을 갖췄다. 명시한 Core 계약과 7번, 10번, 11번, 15번, 16번, Codex 하네스 최소 경로가 완료됐다. 다음 구현 우선순위는 18번의 실제 다섯 조건 실행, evaluator orchestration과 원시 결과 집계다.
+현재 런타임은 세 역할의 분리 호출, 이전 후보 warm-start, QA용 동결 worktree, 실제 후보 diff, 구조화된 증거, 반복 gap 에스컬레이션, 점진적 역할 컨텍스트, 역할별 pi 자원·compaction 정책, Git 이력, 재개와 논문 실행 계약 고정을 갖췄다. 명시한 Core 계약과 7번, 10번, 11번, 15번, 16번, Codex 하네스 최소 경로, 18번의 다섯 조건 실행·외부 평가 orchestration·원시 결과 집계까지 완료됐다. 따라서 실행 인프라 기준으로 18번까지의 필수 구현은 끝났다. 8B는 Draft opt-in이고, 12·13은 미착수 필요 시 항목이며, 17은 `examples/1945`까지 부분 완료돼 추가 kit만 필요 시 확장한다. 두 번째 대체 어댑터도 실제 비교 수요가 생길 때 진행한다. 다만 런타임 완성만으로 논문 성능 수치가 입증되지는 않는다. 그런 주장은 별도로 공급한 공식 benchmark evaluator 또는 독립 human rubric을 결과 생성 전에 등록하고 실제 표본 실행을 완료해야 한다.
 
 ## 우선순위 요약
 
@@ -57,7 +57,7 @@
 | 15 | 입력 receipt와 무결성 검증 | Full | 완료 | 유지 | – | 3, 4 |
 | 16 | 실행 리포트 확장 | Ops | 완료 | 유지 | – | 3, 15 |
 | 17 | 프로젝트 유형별 검증 키트 | Extension | 부분 완료 | P3 | 0.5일/개 | – |
-| 18 | 대조군·ablation·외부 평가 프로토콜 | Experiment | 부분 완료 | P2 | 1~2일 | 4, 14, 15 |
+| 18 | 대조군·ablation·외부 평가 프로토콜 | Experiment | 완료 | 유지 | – | 4, 14, 15 |
 
 ---
 
@@ -115,7 +115,7 @@
 
 ## 5. 저장소·CI·문서 기준선 — 완료
 
-런타임, PRD coverage, 재현 가능한 검증이 의미 단위 커밋으로 정리돼 있고 CI와 README, 예제가 현재 동작과 맞춰져 있다. 기준일 현재 `npm test` 결과는 75/75 통과다.
+런타임, PRD coverage, 재현 가능한 검증이 의미 단위 커밋으로 정리돼 있고 CI와 README, 예제가 현재 동작과 맞춰져 있다. 기준일 현재 `npm test` 전체가 통과한다.
 
 ## 6. QA에 후보 diff 제공 — 완료
 
@@ -131,7 +131,7 @@ Developer 전후의 전체 Git SHA를 candidate record에 고정하고, QA workt
 
 ## 7. 장기 실행 제어·예산·재시도 — 완료
 
-재개와 상태 기록은 있으나 장시간 무인 실행을 위한 lifecycle 제어가 부족하다. 이 항목은 논문 알고리즘의 필수 조건이 아니라 운영 안정성 작업이다.
+기존 재개와 상태 기록에 장시간 무인 실행을 위한 lifecycle 제어를 추가했다. 이 항목은 논문 알고리즘의 필수 조건이 아니라 운영 안정성 작업이다.
 
 완료된 기반:
 
@@ -181,7 +181,7 @@ Developer 전후의 전체 Git SHA를 candidate record에 고정하고, QA workt
 - inline이 생략됐거나 index가 불충분하면 역할이 명시된 정본 파일을 읽도록 system contract가 요구한다.
 - 각 역할에 실제로 전달된 마지막 system/user prompt와 개별·결합 SHA-256을 `prompts/<role>.json`에 보존한다. structured-output retry의 runtime notice도 포함한다.
 - 큰 다국어 fixture의 byte 상한, omitted-body sentinel, 역할별 금지 입력, retry snapshot, mid-loop resume, 후보 commit에서 runtime snapshot 제외, 하네스 프로세스 내부 transcript buffering을 자동 테스트한다.
-- 이전 record에 임의 `external_evaluator` metadata를 넣어도 다음 세 역할의 렌더링 prompt와 snapshot에는 섞이지 않는 부정 테스트가 있다. evaluator 파일·프로세스 자체를 workspace 밖에 두는 완전한 실험 격리는 18번 범위다.
+- 이전 record에 임의 `external_evaluator` metadata를 넣어도 다음 세 역할의 렌더링 prompt와 snapshot에는 섞이지 않는 부정 테스트가 있다. evaluator 파일·프로세스 자체를 역할 workspace 밖에 두는 실험 격리는 18번에서 구현했다.
 
 ## 10. 역할별 pi 확장·스킬 주입 — 완료
 
@@ -236,7 +236,7 @@ CLI나 프로젝트 도구로 표현할 수 없는 브라우저, DB, 외부 서�
 - CLI version, usage, structured output, timeout·외부 취소 process-group 종료를 공통 결과로 변환한다. monetary cost를 보고하지 않는 Codex run에는 cost budget을 허용하지 않는다.
 - 가짜 Codex CLI를 통한 `paper` 1-loop 통합 테스트가 동일 모델 receipt, 세 역할 분리 호출, structured deliverable과 완료 상태를 검증한다.
 
-OpenCode 계열 두 번째 어댑터는 Codex로 18번 end-to-end experiment manifest를 먼저 재현한 뒤 추가한다. 논문 실험 재현 완료 판정에는 최소 한 개 대체 어댑터면 충분하므로 지금은 어댑터 수를 늘리지 않는다.
+Codex를 사용한 18번 end-to-end experiment 경로가 구현돼 있으므로 최소 한 개 대체 어댑터 조건은 충족한다. OpenCode 계열 두 번째 어댑터는 실제로 하네스 간 추가 비교가 필요할 때만 구현한다.
 
 ## 15. 입력 receipt와 무결성 검증 — 완료
 
@@ -267,28 +267,24 @@ exact prompt는 메모리에서 먼저 해시하고, 저장 snapshot과 역할·
 
 `examples/1945` 웹 게임 예제가 첫 검증 키트 역할을 한다. 다음 키트는 실제 프로젝트가 생길 때 `PRD + config + tools + checks`의 최소 묶음으로 추가한다. Node, Python, 웹 앱용 범용 플랫폼을 미리 만들지 않는다. 각 키트는 프로젝트 고유 도구가 저장소 밖 경로나 임시 상태에 의존하지 않는지 검증한다.
 
-## 18. 대조군·ablation·외부 평가 프로토콜 — 부분 완료
+## 18. 대조군·ablation·외부 평가 프로토콜 — 완료
 
 논문과 같은 성능 주장을 하려면 런타임 기능보다 먼저 실험 격리를 보장해야 한다.
 
-완료된 기반:
+구현된 범위:
 
-- 다섯 조건(`hoh`, `vanilla`, `no-plan-update`, `no-evidence`, `no-warm-start`), 공통 예산, 표본·반복·seed, evaluator argv/version/rubric/executable SHA-256, metric·집계·불확실성·제외·재시도 규칙을 결과 생성 전에 고정하는 immutable experiment manifest
-- plan hash를 유지한 append-only attempt 결과와 retry lineage, run receipt 참조, 유효/무효 판정 검증
+- 다섯 조건(`hoh`, `vanilla`, `no-plan-update`, `no-evidence`, `no-warm-start`), 공통 예산, 표본·반복·seed, evaluator argv/version/rubric/executable SHA-256, metric·집계·불확실성·제외·재시도 규칙을 첫 역할 호출 전에 고정하는 immutable experiment manifest
+- 동일 하네스·모델·스펙·예산과 A0를 재검증하는 조건 실행기. `vanilla`는 Planner·QA 없이 연속 Developer만 실행하고, 세 ablation은 각각 loop-1 plan 고정, Planner의 이전 evidence 제거, 매 loop A0 복원을 강제한다.
+- 프로세스 전역 역할 환경의 교차 오염을 막기 위한 조건 실행 직렬화, fresh workspace 요구, 역할 직전 durable intent와 미완료 intent가 남은 실험의 재실행·집계 차단
+- Git SHA-1과 SHA-256 저장소에서 정확한 최종 candidate tree를 고정 tar로 보존하는 archive 경로. ambient Git config와 외부 attributes를 차단하고 archive와 evaluator receipt의 바이트 해시를 연결한다.
 - 중립 임시 경로와 `artifact.bin`, 고정 argv, 최소 공개 환경만 전달하고 task/sample/artifact 이외의 run label·중간 점수를 직렬화하지 않는 별도 evaluator 프로세스
 - evaluator 실행파일을 실행 전후 SHA-256으로 확인하고 stdout/stderr 한도, 단일 finite JSON, timeout·취소 process-group 종료, 결과 receipt를 기록하는 blind evaluator 코어
+- 각 attempt의 condition/protocol/run/evaluator receipt, 원시 JSONL 결과, exclusion과 retry lineage를 양방향 검증하고 `macro_mean`과 결정적 10,000회 bootstrap 95% 구간을 계산하는 집계
+- 최종 manifest·원시 결과·집계의 해시를 묶은 completion anchor. 완료 뒤에는 attempt를 추가할 수 없고 새 실험 plan을 시작해야 한다.
 
-이 경계는 신뢰된 cooperative evaluator를 위한 입력 blinding이다. 같은 사용자 권한의 악성 evaluator를 막는 filesystem/network sandbox가 아니며 receipt에도 그 한계를 명시한다.
+이 경계는 신뢰된 cooperative evaluator를 위한 입력 blinding과 무결성 검증이다. 같은 사용자 권한의 악성 evaluator를 막는 filesystem/network sandbox가 아니며, experiment 저장소가 신뢰되고 실행 중 외부에서 바뀌지 않는다는 전제가 있다. SHA-256 receipt는 불일치 탐지용 checksum이지 서명이나 authenticity 증명이 아니다.
 
-남은 항목:
-
-- 동일 하네스·모델·스펙·예산의 Vanilla 연속 개발 대조군
-- `no-plan-update`, `no-evidence`, `no-warm-start` ablation
-- artifact 생성 전에 버전이 고정된 공식 benchmark evaluator 또는 독립 human rubric
-- 각 condition 실행 결과와 protocol/run/evaluator receipt를 manifest attempt에 연결하는 orchestration
-- 원시 결과와 집계 스크립트 보존
-
-외부 ground truth가 없는 자체 QA PASS를 벤치마크 점수로 사용하지 않는다. 이 프로토콜과 evaluator 독립성이 완성되기 전에는 논문 대비 성능 향상 수치를 주장하지 않는다.
+등록한 evaluator의 실행파일·버전·rubric hash가 일치한다는 사실은 evaluator가 독립 ground truth라는 뜻이 아니다. 외부 ground truth가 없는 자체 QA PASS를 벤치마크 점수로 사용하지 않는다. 논문 대비 성능 수치를 주장하려면 artifact 생성 전에 버전이 고정된 공식 benchmark evaluator 또는 독립 human rubric을 등록하고, 해당 표본의 실제 실험 결과를 별도로 보존해야 한다.
 
 ---
 
@@ -296,14 +292,13 @@ exact prompt는 메모리에서 먼저 해시하고, 저장 snapshot과 역할·
 
 - **Core 완료**: 4, 6, 8A, 9가 자동 테스트와 함께 완료됨
 - **논문 전체 시스템에 근접**: Core에 10, 15가 추가 완료
-- **논문 실험 재현 가능**: 14의 최소 1개 대체 어댑터와 18이 완료되고 외부 평가 격리가 검증됨
-- **운영 완성도 향상**: 실제 장기 실행 필요에 맞춰 7, 11, 16을 선택적으로 완료
+- **논문 실험 프로토콜 실행 가능**: 14의 최소 1개 대체 어댑터와 18의 실행·외부 평가 격리가 자동 테스트로 검증됨
+- **논문 성능 수치 비교 가능**: 공식 benchmark evaluator 또는 독립 human rubric을 사전 등록하고 실제 표본 실행을 완료함
+- **운영 완성도 유지**: 완료된 7, 11, 16의 장기 실행 회귀 검증을 유지
 
 ## 권장 진행 순서
 
-1. 완료된 **10번**의 역할별 하네스 자원 계약을 유지한다.
-2. **7번**의 lifecycle·취소·재시도 기반을 유지하고 남은 예산 원장을 완성한다.
-3. 초안식 **8B 후보 복구**는 실제 결정적 회귀가 관찰될 때만 별도 opt-in으로 검증한다.
-4. 성능 비교가 필요해졌을 때만 **14번과 18번**을 묶어 실험한다.
-
-12, 13, 17은 구체적인 사용 사례가 생기기 전에는 확장하지 않는다.
+1. 완료된 Core·실험 계약과 자동 회귀 검증을 유지한다.
+2. 성능 비교가 필요하면 공식 benchmark evaluator 또는 독립 human rubric을 먼저 고정하고 **18번**의 새 immutable plan으로 실행한다.
+3. 두 번째 대체 하네스가 필요한 비교에서만 **14번**을 확장한다.
+4. 초안식 **8B 후보 복구**는 결정적 회귀가 관찰될 때만 opt-in하고, 12·13과 17의 추가 kit는 구체적인 사용 사례가 생길 때만 진행한다.

@@ -50,14 +50,23 @@ of pretending that Codex exposes pi's individual built-in tool names.
   verification assumes the workspace is quiescent while files are read. The
   receipt itself and generated `.hoh/README.md` view are excluded; CLI
   verification also rejects unrecorded canonical files and unsafe entries.
-- **Pre-registered experiment boundary (foundation).** An immutable experiment
-  plan fixes all five comparison conditions, common budget, samples, repeats,
-  evaluator executable/version/rubric hashes, analysis, exclusions, and retry
-  rules before outcomes append. The blind evaluator receives only neutralized
+- **Sealed experiment orchestration.** An immutable plan fixes all five
+  comparison conditions, the common harness/model/spec/budget/A0, samples,
+  repeats, evaluator identity, analysis, exclusions, and retry rules before any
+  role runs. Each attempt revalidates those inputs, executes one condition in a
+  fresh workspace, archives the exact candidate tree with a sanitized Git
+  environment, and only then invokes the blind evaluator. Canonical condition,
+  protocol, run, evaluator, raw-result, aggregate, and completion receipts make
+  incomplete intents and post-completion appends fail closed.
+- **Experiment trust boundary.** The evaluator receives only neutralized
   task/sample/artifact input in a separate process with bounded output and no
-  inherited parent environment. It assumes trusted cooperative evaluator code;
-  it is explicitly not a filesystem or network sandbox. Condition runners and
-  result aggregation remain to be connected.
+  inherited parent environment. The receipts verify that the invoked executable
+  bytes and declared version/rubric match their pre-registered values, and keep
+  scores out of development prompts, but they do not make a supplied rubric
+  independent ground truth. Performance claims still require an official
+  benchmark or independent human rubric. The design assumes trusted cooperative
+  evaluator code and trusted experiment storage; it is not a filesystem/network
+  sandbox, and SHA-256 receipts are checksums rather than signatures.
 - **Candidate identity.** After the Developer finishes, the runtime commits the
   workspace and hashes only the configured `artifact_dir` subtree, respecting
   Git ignore rules. `artifact_dir: "."` means the whole workspace except
@@ -437,6 +446,13 @@ npm test
 - `experiment-evaluator.test.ts`: neutralized serialized input, exact argv and
   executable hashes, bounded finite-JSON output, environment blinding, and
   process-group cancellation under the trusted-evaluator threat model.
+- `experiment-conditions.test.ts`: the five concrete condition policies,
+  common protocol/model identity, fixed A0 behavior, and evaluator isolation.
+- `experiment-aggregate.test.ts`: manifest/raw/evaluator receipt binding,
+  exclusion consistency, deterministic macro means, and bootstrap intervals.
+- `experiment-orchestrator.test.ts`: pre-role registration, all five conditions,
+  exact candidate archives, drift and symlink rejection, durable intents,
+  concurrency exclusion, and post-completion sealing across SHA-1/SHA-256 repos.
 - `ledger.test.ts`: exact gap identity, duplicate and replay idempotence,
   adjacent-loop escalation, and open/closed/regressed transitions.
 - `config.test.ts`: config merge and validation, paper/extended protocol
