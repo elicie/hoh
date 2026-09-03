@@ -2,16 +2,18 @@
 /**
  * hoh — Harness-of-Harness runtime CLI
  *
- *   hoh run    --workspace <dir> --spec <PRD.md> [--config <file>] [--loops <n>]
+ *   hoh run    --workspace <dir> --spec <PRD.md> [--config <file>] [--loops <n>] [--detach]
  *   hoh init-claims --workspace <dir> --spec <PRD.md> [--config <file>]
  *   hoh status --workspace <dir>
+ *   hoh stop   --workspace <dir>
+ *   hoh logs   --workspace <dir> [-f]
  *   hoh config --workspace <dir> [--config <file>]
  *
  * Models, providers (OpenAI-compatible endpoints), harness, checks and
  * timeouts are managed in hoh.config.json, not in CLI flags.
  */
 import { existsSync } from "node:fs";
-import { readFile } from "node:fs/promises";
+import { mkdir, readFile } from "node:fs/promises";
 import path from "node:path";
 import { parseArgs } from "node:util";
 import { resolveCliModel } from "@earendil-works/pi-coding-agent";
@@ -29,6 +31,20 @@ import {
   validateConfig,
 } from "./runtime/config.js";
 import { ledgerSummary } from "./runtime/ledger.js";
+import {
+  DEFAULT_STOP_WAIT_MS,
+  DETACHED_CHILD_ENV,
+  followLifecycleLog,
+  launchDetachedRun,
+  lifecycleIsActive,
+  lifecycleProcessIsCurrent,
+  readLifecycleLog,
+  readLifecycleState,
+  requestLifecycleStop,
+  RunLifecycle,
+  type LifecycleState,
+  waitForLifecycleTerminal,
+} from "./runtime/lifecycle.js";
 import { runHoh } from "./runtime/loop.js";
 import { coverageSummary, loadClaimCatalog, loadCoverage } from "./runtime/coverage.js";
 import { commitAll, ensureRepo, RUNTIME_IDENTITY } from "./runtime/git.js";
@@ -39,9 +55,11 @@ import { ROLES } from "./types.js";
 const USAGE = `hoh — Harness-of-Harness runtime on top of the pi coding agent
 
 Usage:
-  hoh run    --workspace <dir> --spec <PRD.md> [--config <file>] [--loops <n>]
+  hoh run    --workspace <dir> --spec <PRD.md> [--config <file>] [--loops <n>] [--detach]
   hoh init-claims --workspace <dir> --spec <PRD.md> [--config <file>]
   hoh status --workspace <dir>
+  hoh stop   --workspace <dir>
+  hoh logs   --workspace <dir> [-f]
   hoh config --workspace <dir> [--config <file>]      effective config, discovered models, per-role resolution
 
 Configuration (${CONFIG_FILE_NAME}) — protocol, providers, models, harness, budget, checks, timeouts:
@@ -140,11 +158,18 @@ async function showConfig(r: Resolved, log: (m: string) => void): Promise<number
 }
 
 async function showStatus(workspace: string): Promise<number> {
+  let lifecycle: LifecycleState | null = null;
+  try {
+    lifecycle = await readLifecycleState(workspace);
+  } catch {
+    // A workspace without a repository can still produce the existing no-run response below.
+  }
+  if (lifecycle) printLifecycleStatus(lifecycle);
   const paths = new RunPaths(workspace);
   const run = await loadRun(paths);
   if (!run) {
     process.stdout.write(`No HoH run in ${workspace}\n`);
-    return 1;
+    return lifecycle ? 0 : 1;
   }
   const ledger = await loadLedger(paths);
   const s = ledgerSummary(ledger);
@@ -175,6 +200,66 @@ async function showStatus(workspace: string): Promise<number> {
   return 0;
 }
 
+function printLifecycleStatus(state: LifecycleState): void {
+  const active = lifecycleIsActive(state);
+  const alive = active && lifecycleProcessIsCurrent(state);
+  const effectiveStatus = active && !alive ? "STALE" : state.status.toUpperCase();
+  const loop = state.loop_index === null ? "loop -" : `loop ${state.loop_index}`;
+  const elapsedEnd = active ? Date.now() : Date.parse(state.updated_at);
+  const elapsed = formatElapsed(elapsedEnd - Date.parse(state.started_at));
+  process.stdout.write(
+    `Lifecycle: ${effectiveStatus} (pid ${state.pid}${active ? `, ${alive ? "alive" : "missing"}` : ""}) — ${loop}, role ${state.phase}, elapsed ${elapsed}\n`,
+  );
+  if (state.message) process.stdout.write(`Lifecycle message: ${state.message}\n`);
+}
+
+function formatElapsed(milliseconds: number): string {
+  const seconds = Math.max(0, milliseconds) / 1_000;
+  if (seconds < 60) return `${seconds.toFixed(1)}s`;
+  const minutes = Math.floor(seconds / 60);
+  return `${minutes}m ${(seconds - minutes * 60).toFixed(0)}s`;
+}
+
+async function stopRun(workspace: string): Promise<number> {
+  const request = await requestLifecycleStop(workspace);
+  if (!request.requested || !request.state) {
+    const suffix = request.reason === "process-missing" ? " (recorded process is missing)" : "";
+    process.stdout.write(`No active HoH run in ${workspace}${suffix}\n`);
+    return 1;
+  }
+  process.stdout.write(`Stop requested for HoH pid ${request.state.pid}; waiting for runtime cleanup...\n`);
+  const terminal = await waitForLifecycleTerminal(workspace, request.state.instance_id);
+  if (terminal?.instance_id === request.state.instance_id && lifecycleIsActive(terminal)) {
+    process.stderr.write(
+      `HoH pid ${request.state.pid} did not stop within ${DEFAULT_STOP_WAIT_MS / 1_000}s; the stop request remains pending.\n`,
+    );
+    return 1;
+  }
+  process.stdout.write(`HoH pid ${request.state.pid} stopped${terminal ? ` (${terminal.status})` : ""}.\n`);
+  return 0;
+}
+
+async function showLogs(workspace: string, follow: boolean): Promise<number> {
+  if (!follow) {
+    process.stdout.write(await readLifecycleLog(workspace));
+    return 0;
+  }
+  const controller = new AbortController();
+  const abort = () => controller.abort();
+  process.once("SIGINT", abort);
+  process.once("SIGTERM", abort);
+  try {
+    await followLifecycleLog(workspace, (chunk) => process.stdout.write(chunk), controller.signal);
+    return 0;
+  } catch (error) {
+    if (controller.signal.aborted) return 130;
+    throw error;
+  } finally {
+    process.removeListener("SIGINT", abort);
+    process.removeListener("SIGTERM", abort);
+  }
+}
+
 async function main(argv: string[]): Promise<number> {
   const { values, positionals } = parseArgs({
     args: argv,
@@ -184,6 +269,8 @@ async function main(argv: string[]): Promise<number> {
       spec: { type: "string", short: "s" },
       config: { type: "string", short: "c" },
       loops: { type: "string", short: "n" },
+      detach: { type: "boolean" },
+      follow: { type: "boolean", short: "f" },
       help: { type: "boolean", short: "h" },
     },
   });
@@ -195,7 +282,70 @@ async function main(argv: string[]): Promise<number> {
   const log = (m: string) => process.stderr.write(`${new Date().toISOString()} ${m}\n`);
   const workspace = path.resolve(values.workspace ?? process.cwd());
 
+  if (values.detach && cmd !== "run") throw new Error("--detach is only valid with run");
+  if (values.follow && cmd !== "logs") throw new Error("--follow/-f is only valid with logs");
   if (cmd === "status") return showStatus(workspace);
+  if (cmd === "stop") return stopRun(workspace);
+  if (cmd === "logs") return showLogs(workspace, values.follow ?? false);
+  if (cmd === "run" && values.detach && process.env[DETACHED_CHILD_ENV] !== "1") {
+    if (values.spec) await readFile(values.spec, "utf8");
+    await mkdir(workspace, { recursive: true });
+    await ensureRepo(workspace);
+    const detached = await launchDetachedRun({
+      workspace,
+      cliPath: process.argv[1],
+      args: argv.filter((arg) => arg !== "--detach"),
+    });
+    const action = lifecycleIsActive(detached.state) ? "Started detached HoH run" : `Detached HoH run ${detached.state.status}`;
+    process.stdout.write(`${action} (pid ${detached.pid}).\nLog: ${detached.logPath}\n`);
+    return 0;
+  }
+  if (cmd === "run") {
+    if (values.spec) await readFile(values.spec, "utf8");
+    await mkdir(workspace, { recursive: true });
+    await ensureRepo(workspace);
+    const lifecycle = await RunLifecycle.start(workspace);
+    const detachedChild = process.env[DETACHED_CHILD_ENV] === "1";
+    const runLog = (message: string) => {
+      lifecycle.observe(message);
+      const line = `${new Date().toISOString()} ${message}\n`;
+      if (!detachedChild) lifecycle.appendLog(line);
+      process.stderr.write(line);
+    };
+    try {
+      loadEnvFiles(workspace, runLog);
+      const r = await resolve(values);
+      const harness = await createHarness(r.effective, r.workspace, { log: runLog });
+      lifecycle.signal.throwIfAborted();
+      const result = await runHoh({
+        workspace: r.workspace,
+        specPath: values.spec,
+        harness,
+        config: r.patch ?? undefined,
+        configSource: r.source,
+        log: runLog,
+        signal: lifecycle.signal,
+      });
+      lifecycle.signal.throwIfAborted();
+      const s = ledgerSummary(result.ledger);
+      runLog(`run ${result.run.run_id}: ${result.results.length} loop(s) executed; ledger open ${s.open}, regressed ${s.regressed}, closed ${s.closed}`);
+      for (const x of result.results) {
+        runLog(`  loop ${x.loopIndex}: ${x.evidence.qa_status.toUpperCase()} ${x.developer.candidate_id} — ${x.planner.objective}`);
+      }
+      runLog(`record: ${new RunPaths(r.workspace).readme}`);
+      await lifecycle.finish("completed", 0);
+      return 0;
+    } catch (error: any) {
+      const stopped = lifecycle.signal.aborted && lifecycle.cancellationSource !== "control-error";
+      const message = lifecycle.signal.reason instanceof Error ? lifecycle.signal.reason.message : error?.message ?? String(error);
+      const exitCode = lifecycle.cancellationSource === "SIGTERM" ? 143 : 130;
+      await lifecycle.finish(stopped ? "stopped" : "failed", stopped ? exitCode : 1, message);
+      if (stopped) return exitCode;
+      throw lifecycle.signal.reason ?? error;
+    } finally {
+      await lifecycle.close();
+    }
+  }
   loadEnvFiles(workspace, log);
   const r = await resolve(values);
   if (cmd === "config") return showConfig(r, log);
@@ -225,28 +375,8 @@ async function main(argv: string[]): Promise<number> {
     );
     return 0;
   }
-  if (cmd !== "run") {
-    process.stderr.write(`Unknown command "${cmd}"\n\n${USAGE}`);
-    return 1;
-  }
-
-  if (values.spec) await readFile(values.spec, "utf8"); // fail early with a clear error
-  const harness = await createHarness(r.effective, r.workspace, { log });
-  const result = await runHoh({
-    workspace: r.workspace,
-    specPath: values.spec,
-    harness,
-    config: r.patch ?? undefined,
-    configSource: r.source,
-    log,
-  });
-  const s = ledgerSummary(result.ledger);
-  log(`run ${result.run.run_id}: ${result.results.length} loop(s) executed; ledger open ${s.open}, regressed ${s.regressed}, closed ${s.closed}`);
-  for (const x of result.results) {
-    log(`  loop ${x.loopIndex}: ${x.evidence.qa_status.toUpperCase()} ${x.developer.candidate_id} — ${x.planner.objective}`);
-  }
-  log(`record: ${new RunPaths(r.workspace).readme}`);
-  return 0;
+  process.stderr.write(`Unknown command "${cmd}"\n\n${USAGE}`);
+  return 1;
 }
 
 main(process.argv.slice(2)).then(

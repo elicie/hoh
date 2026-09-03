@@ -34,7 +34,7 @@
 
 ## 현재 판단
 
-현재 런타임은 세 역할의 분리 호출, 이전 후보 warm-start, QA용 동결 worktree, 실제 후보 diff, 구조화된 증거, 반복 gap 에스컬레이션, 점진적 역할 컨텍스트, 역할별 pi 자원, Git 이력, 재개와 논문 실행 계약 고정을 갖췄다. 명시한 Core 계약과 10번은 완료됐다. 다음 작업은 장기 실행 중 안전한 정지를 먼저 보장하는 **7번 lifecycle·취소 계약**이다.
+현재 런타임은 세 역할의 분리 호출, 이전 후보 warm-start, QA용 동결 worktree, 실제 후보 diff, 구조화된 증거, 반복 gap 에스컬레이션, 점진적 역할 컨텍스트, 역할별 pi 자원, Git 이력, 재개와 논문 실행 계약 고정을 갖췄다. 명시한 Core 계약과 10번, 7번의 lifecycle·취소·재시도 기반은 완료됐다. 다음 작업은 7번의 명시적 예산 원장을 완성하는 것이다.
 
 ## 우선순위 요약
 
@@ -140,11 +140,12 @@ Developer 전후의 전체 Git SHA를 candidate record에 고정하고, QA workt
 - Tester 취소를 QA 실패나 runtime error로 기록하지 않으며 임시 QA worktree와 환경 경계를 정리한다.
 - pi의 ambient 설정보다 우선하는 provider request, stream idle, WebSocket connect timeout과 transient retry 횟수·지수 backoff를 run config에 고정한다. provider SDK 자체 retry는 0으로 두어 같은 pi session이 timeout·5xx·연결 끊김만 분류하고 이어간다.
 - `auto_retry_start`·`auto_retry_end` 전체 이력은 역할 transcript에, retry 횟수와 경과 시간은 역할 record와 Markdown report에 보존한다.
+- `run --detach`, `status`, `stop`, `logs -f`가 Git metadata 아래의 process state·lock·log를 사용하며, stop 요청과 CLI SIGTERM/SIGINT는 같은 `AbortSignal` 정리 경로로 들어간다.
+- Linux에서는 PID뿐 아니라 boot id와 `/proc/<pid>/stat` start time을 함께 확인해 PID 재사용으로 stale run이나 lock을 현재 프로세스로 오인하지 않는다.
+- status는 현재 loop·역할·경과 시간을 표시하고, compiled CLI 통합 테스트는 stop과 SIGTERM 뒤 check process와 QA worktree가 남지 않는지 확인한다.
 
 남은 작업:
 
-- `run --detach`, PID·로그 기록, `stop`, `logs -f`, 현재 역할·경과 시간 표시
-- CLI SIGTERM·stop 요청을 위 취소 계약에 연결
 - 역할·루프·run 단위 토큰/비용/시간 예산과 `budget_exhausted` 종료 상태
 
 모델이 낸 QA 실패나 개발 결과를 전송 오류처럼 자동 재시도하지 않는다. 사람 체크포인트는 `extended` 프로토콜에서만 선택적으로 제공한다.
@@ -288,7 +289,7 @@ receipt는 비밀 값 자체를 저장하지 않고, 재현에 필요한 공개 
 ## 권장 진행 순서
 
 1. 완료된 **10번**의 역할별 하네스 자원 계약을 유지한다.
-2. 다음으로 **7번**의 lifecycle·취소를 먼저 만들고 예산·재시도를 이어서 추가한다.
+2. **7번**의 lifecycle·취소·재시도 기반을 유지하고 남은 예산 원장을 완성한다.
 3. 초안식 **8B 후보 복구**는 실제 결정적 회귀가 관찰될 때만 별도 opt-in으로 검증한다.
 4. 성능 비교가 필요해졌을 때만 **14번과 18번**을 묶어 실험한다.
 
