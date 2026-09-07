@@ -137,9 +137,13 @@ a `docs`/`feat`/`test` commit in that workspace's Git history.
 
 ### 2. Real run
 
+The examples use `gateway`, `MODEL_API_KEY`, and `https://api.example.com/v1`
+as placeholders. Set the provider URL, credential reference, and model IDs in
+your config to match your service.
+
 ```bash
 # 1. credentials: keep them out of the committed config
-echo 'SPBROS_API_KEY=…' > .env          # .env is git-ignored and loaded automatically
+echo 'MODEL_API_KEY=…' > .env          # .env is git-ignored and loaded automatically
 
 # 2. point the config at your endpoint and models, then confirm they resolve
 node dist/cli.js config --workspace ../my-project
@@ -161,11 +165,11 @@ credentials, so it is a safe pre-flight:
 
 ```
 Providers (pi models file: ../my-project/.hoh/pi-models.json):
-  spbros: https://ai-api.spbros.com/v1 [openai-completions] — 23 model(s) (discovered)
+  gateway: https://api.example.com/v1 [openai-completions] — 23 model(s) (discovered)
 Models per role:
-  planner   spbros/gpt-5.5:high  -> spbros/gpt-5.5 (thinking high)  [auth ok]
-  developer spbros/gpt-5.5:high  -> spbros/gpt-5.5 (thinking high)  [auth ok]
-  tester    spbros/gpt-5.5:high  -> spbros/gpt-5.5 (thinking high)  [auth ok]
+  planner   gateway/gpt-5.5:high  -> gateway/gpt-5.5 (thinking high)  [auth ok]
+  developer gateway/gpt-5.5:high  -> gateway/gpt-5.5 (thinking high)  [auth ok]
+  tester    gateway/gpt-5.5:high  -> gateway/gpt-5.5 (thinking high)  [auth ok]
 ```
 
 `examples/1945/` is a complete worked input kit from a real three-loop run: a
@@ -542,9 +546,9 @@ lists can be discovered from `GET {base_url}/models`. The root config uses
   "protocol": "extended",
   "harness": "pi",
   "providers": {
-    "spbros": {
-      "base_url": "https://ai-api.spbros.com/v1",
-      "api_key": "$SPBROS_API_KEY",
+    "gateway": {
+      "base_url": "https://api.example.com/v1",
+      "api_key": "$MODEL_API_KEY",
       "api": "openai-completions",
       "models": "discover",
       "discover": { "exclude": ["image", "video", "embed", "tts", "codex-auto-review"] },
@@ -559,7 +563,7 @@ lists can be discovered from `GET {base_url}/models`. The root config uses
     }
   },
   "models": {
-    "default": "spbros/gpt-5.5:high",
+    "default": "gateway/gpt-5.5:high",
     "tester": "ollama/qwen3-coder:30b"
   },
   "loops": 3,

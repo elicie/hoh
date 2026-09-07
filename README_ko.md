@@ -120,9 +120,12 @@ Loop  Candidate            QA        Verified/Gaps  Objective
 
 ### 2. 실제 모델로 실행
 
+예제의 `gateway`, `MODEL_API_KEY`, `https://api.example.com/v1`은 예시 값입니다.
+설정의 공급자 URL, 인증 정보 참조, 모델 ID를 사용하는 서비스에 맞게 지정하세요.
+
 ```bash
 # 1. 인증 정보는 커밋하는 설정 파일 밖에 보관
-echo 'SPBROS_API_KEY=…' > .env          # .env는 Git에서 제외되며 자동 로드됨
+echo 'MODEL_API_KEY=…' > .env          # .env는 Git에서 제외되며 자동 로드됨
 
 # 2. 설정에 엔드포인트와 모델을 지정한 뒤 해석 결과 확인
 node dist/cli.js config --workspace ../my-project
@@ -143,11 +146,11 @@ HoH는 커밋과 워크트리를 만들며, 역할이 허용된 실행 기록 �
 
 ```
 Providers (pi models file: ../my-project/.hoh/pi-models.json):
-  spbros: https://ai-api.spbros.com/v1 [openai-completions] — 23 model(s) (discovered)
+  gateway: https://api.example.com/v1 [openai-completions] — 23 model(s) (discovered)
 Models per role:
-  planner   spbros/gpt-5.5:high  -> spbros/gpt-5.5 (thinking high)  [auth ok]
-  developer spbros/gpt-5.5:high  -> spbros/gpt-5.5 (thinking high)  [auth ok]
-  tester    spbros/gpt-5.5:high  -> spbros/gpt-5.5 (thinking high)  [auth ok]
+  planner   gateway/gpt-5.5:high  -> gateway/gpt-5.5 (thinking high)  [auth ok]
+  developer gateway/gpt-5.5:high  -> gateway/gpt-5.5 (thinking high)  [auth ok]
+  tester    gateway/gpt-5.5:high  -> gateway/gpt-5.5 (thinking high)  [auth ok]
 ```
 
 `examples/1945/`에는 실제 세 루프 실행에 사용한 입력 구성이 있습니다.
@@ -450,9 +453,9 @@ iterations/loop-NN/
   "protocol": "extended",
   "harness": "pi",
   "providers": {
-    "spbros": {
-      "base_url": "https://ai-api.spbros.com/v1",
-      "api_key": "$SPBROS_API_KEY",
+    "gateway": {
+      "base_url": "https://api.example.com/v1",
+      "api_key": "$MODEL_API_KEY",
       "api": "openai-completions",
       "models": "discover",
       "discover": { "exclude": ["image", "video", "embed", "tts", "codex-auto-review"] },
@@ -467,7 +470,7 @@ iterations/loop-NN/
     }
   },
   "models": {
-    "default": "spbros/gpt-5.5:high",
+    "default": "gateway/gpt-5.5:high",
     "tester": "ollama/qwen3-coder:30b"
   },
   "loops": 3,
