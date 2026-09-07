@@ -2,9 +2,9 @@
   "protocol": "paper",
   "harness": "pi",
   "providers": {
-    "spbros": {
-      "base_url": "https://ai-api.spbros.com/v1",
-      "api_key": "$SPBROS_API_KEY",
+    "gateway": {
+      "base_url": "https://api.example.com/v1",
+      "api_key": "$MODEL_API_KEY",
       "api": "openai-completions",
       "models": "discover",
       "discover": {
@@ -36,10 +36,10 @@
     }
   },
   "models": {
-    "default": "spbros/gpt-5.5:high",
-    "planner": "spbros/gpt-5.5:high",
-    "developer": "spbros/gpt-5.5:high",
-    "tester": "spbros/gpt-5.5:high"
+    "default": "gateway/gpt-5.5:high",
+    "planner": "gateway/gpt-5.5:high",
+    "developer": "gateway/gpt-5.5:high",
+    "tester": "gateway/gpt-5.5:high"
   },
   "loops": 3,
   "artifact_dir": ".",
