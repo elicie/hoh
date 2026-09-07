@@ -1,5 +1,7 @@
 # hoh — Harness-of-Harness runtime
 
+**English** | [한국어](README_ko.md)
+
 An implementation of the Harness-of-Harness (HoH) loop from
 *Harness of Harness: Multi-Day Autonomous Software Development with Continual Improvement*
 (arXiv 2609.01481). HoH does not replace a coding agent; it wraps one. Each
