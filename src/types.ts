@@ -28,7 +28,17 @@ export interface ExecutionRecord {
   path?: string;
   /** Runtime-computed digest when path names a retained file in HOH_EVIDENCE_DIR. */
   sha256?: string;
+  /** Runtime-assigned provenance; ignored in model submissions. */
+  execution_id?: string;
   observation: string;
+}
+
+/** Files observed changing during a real runtime check or adapter shell call. */
+export interface EvidenceExecution {
+  id: string;
+  command: string;
+  exit_code: number;
+  files: { path: string; sha256: string }[];
 }
 
 export type ClaimStatus = "verified" | "gap";
@@ -74,6 +84,7 @@ export interface EvidenceBundle {
   gap_records: ClaimRecord[];
   planner_handoff: PlannerHandoff;
   checks: CheckResult[];
+  executions?: EvidenceExecution[];
   candidate_source_sha256_before: string;
   candidate_source_sha256_after: string;
   /** true when the tester left the isolated candidate byte-identical */
@@ -172,6 +183,8 @@ export interface DeveloperRecord {
 export interface CheckSpec {
   name: string;
   command: string;
+  /** Predeclared claim ID -> criterion this check actually tests. Never supplied by the Tester. */
+  claims?: Record<string, string>;
   timeout_ms?: number;
   /** config-file friendly alternative to timeout_ms */
   timeout_min?: number;
@@ -182,6 +195,8 @@ export type CheckStatus = "pass" | "fail" | "timeout" | "error";
 export interface CheckResult {
   name: string;
   command: string;
+  /** Copied from the runtime's configured CheckSpec, not model submissions. */
+  claims?: Record<string, string>;
   status: CheckStatus;
   exit_code: number | null;
   duration_ms: number;
@@ -192,6 +207,7 @@ export interface CheckResult {
   stdout_sha256?: string;
   stderr_path?: string;
   stderr_sha256?: string;
+  execution?: EvidenceExecution;
 }
 
 // ---------------------------------------------------------------------------

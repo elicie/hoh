@@ -22,7 +22,7 @@ export const ExecutionRecordSchema = Type.Object({
   path: Type.Optional(
     Type.String({
       description:
-        "File, command, or artifact the observation came from. For screenshots, replay data, storage snapshots, and logs saved in HOH_EVIDENCE_DIR, use a path relative to that directory; the runtime adds sha256.",
+        "For every qualifying execution record, cite a retained file relative to HOH_EVIDENCE_DIR, produced by a successful check or QA shell execution. Command names or prose alone never qualify. The runtime binds sha256 and execution_id.",
     }),
   ),
   observation: Type.String({ description: "What was observed, concretely" }),
@@ -31,7 +31,7 @@ export const ExecutionRecordSchema = Type.Object({
 export const ClaimRecordSchema = Type.Object({
   claim_id: Type.String({
     description:
-      "Stable snake_case id for one behavior (e.g. player_control, result_state). Reuse the exact id only for the same independently observable behavior.",
+      "For verified claims, use an exact predeclared check binding ID and its criterion. All linked checks must pass. New or unbound IDs remain gaps. Reuse an ID only for the same behavior.",
   }),
   claim: Type.String({
     description: "Checkable statement about exactly one independently observable behavior; split parts that could pass or fail separately",
@@ -50,7 +50,7 @@ export const SubmitEvidenceSchema = Type.Object({
   }),
   summary: Type.String({ description: "Two to five sentences for the next planner" }),
   verified_records: Type.Array(ClaimRecordSchema, {
-    description: "Claims whose cited records visibly support the behavior",
+    description: "Only predeclared check-bound claims whose linked checks all passed, with retained execution evidence; unbound observations belong in gap_records",
   }),
   gap_records: Type.Array(ClaimRecordSchema, {
     description: "Observed failures, regressions, unmet requirements, and claims with insufficient evidence",

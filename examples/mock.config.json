@@ -1,7 +1,12 @@
 {
   "protocol": "paper",
   "harness": "mock",
+  "claim_catalog": "generate",
   "loops": 2,
   "artifact_dir": ".",
-  "checks": [{ "name": "files", "command": "ls *.txt" }]
+  "checks": [
+    { "name": "main", "command": "grep -q 'entry scene: Main' main.txt", "claims": { "main_entry": "main.txt names the entry scene." } },
+    { "name": "control", "command": "grep -q 'left/right input moves' player_control.txt", "claims": { "player_control": "player_control.txt describes left/right input handling." } },
+    { "name": "result", "command": "grep -q 'completing the objective shows a result screen' result_state.txt", "claims": { "result_state": "result_state.txt describes the visible completion screen." } }
+  ]
 }

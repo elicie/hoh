@@ -79,6 +79,7 @@ export interface PiModelEntry {
   name?: string;
   api?: string;
   reasoning?: boolean;
+  thinkingLevelMap?: ProviderModelConfig["thinking_level_map"];
   input?: string[];
   contextWindow?: number;
   maxTokens?: number;
@@ -116,6 +117,7 @@ export function toPiModel(id: string, p: ProviderConfig, explicit?: Partial<Prov
   if (merged.name) entry.name = merged.name;
   if (merged.api) entry.api = merged.api;
   if (merged.reasoning !== undefined) entry.reasoning = merged.reasoning;
+  if (merged.thinking_level_map) entry.thinkingLevelMap = { ...merged.thinking_level_map };
   if (merged.input) entry.input = merged.input;
   if (merged.context_window !== undefined) entry.contextWindow = merged.context_window;
   if (merged.max_tokens !== undefined) entry.maxTokens = merged.max_tokens;

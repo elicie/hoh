@@ -6,6 +6,7 @@ import path from "node:path";
 import type { Role } from "../types.js";
 import type { Harness, HarnessRolePolicy, RoleInvocation, RoleResult } from "./types.js";
 import { CODING_TOOLS, emptyUsage, INSPECT_TOOLS, READ_ONLY_TOOLS } from "./types.js";
+import { ExecutionEvidenceCapture } from "../runtime/execution-evidence.js";
 
 const THINKING_LEVELS = new Set(["minimal", "low", "medium", "high", "xhigh"]);
 const CODEX_UNSUPPORTED_SCHEMA_KEYWORDS = new Set(["uniqueItems"]);
@@ -33,6 +34,7 @@ interface ProcessResult {
 
 export class CodexHarness implements Harness {
   readonly name = "codex";
+  readonly modelReporting = "unavailable" as const;
   readonly version: string;
 
   constructor(private readonly opts: CodexHarnessOptions = {}) {
@@ -50,6 +52,16 @@ export class CodexHarness implements Harness {
     return { workspace: "isolated-read-only", builtinTools: ["codex-exec:workspace-write-on-frozen-copy"] };
   }
 
+  preparePrompts(inv: RoleInvocation): { systemPrompt: string; prompt: string } {
+    const adapt = (text: string): string => inv.structuredTools.length
+      ? text
+        .replace(/Output contract:[^\n]*/g, "Output contract: return the final JSON object matching the supplied output schema. No submit tool is available.")
+        .replace(/(?:call|calling)\s+`submit_[a-z_]+`(?:\s+exactly once)?/gi, "return the final JSON object matching the output schema")
+        .replace("The runtime only accepts output delivered through that tool.", "The runtime requires the final JSON object matching the output schema.")
+      : text;
+    return { systemPrompt: adapt(inv.systemPrompt), prompt: adapt(inv.prompt) };
+  }
+
   async invoke(inv: RoleInvocation): Promise<RoleResult> {
     inv.signal?.throwIfAborted();
     const selected = inv.model ?? this.opts.model;
@@ -64,6 +76,8 @@ export class CodexHarness implements Harness {
     const outputPath = path.join(temporary, "last-message.txt");
     const schemaPath = path.join(temporary, "output-schema.json");
     const structured = inv.structuredTools[0];
+    const executionCapture = new ExecutionEvidenceCapture(inv.evidenceDir);
+    const prompts = this.preparePrompts(inv);
     try {
       if (structured) await writeFile(schemaPath, `${JSON.stringify(toCodexOutputSchema(structured.parameters), null, 2)}\n`);
       const args = [
@@ -79,6 +93,7 @@ export class CodexHarness implements Harness {
         sandboxForRole(inv.role),
         "--cd",
         inv.cwd,
+        ...(inv.role === "tester" && inv.evidenceDir ? ["--add-dir", inv.evidenceDir] : []),
         "--model",
         model.model,
         "-c",
@@ -88,7 +103,7 @@ export class CodexHarness implements Harness {
         "-c",
         "project_doc_max_bytes=0",
         "-c",
-        `developer_instructions=${JSON.stringify(inv.systemPrompt)}`,
+        `developer_instructions=${JSON.stringify(prompts.systemPrompt)}`,
         ...(model.reasoning ? ["-c", `model_reasoning_effort=${JSON.stringify(model.reasoning)}`] : []),
         ...(structured ? ["--output-schema", schemaPath] : []),
         "--output-last-message",
@@ -104,7 +119,8 @@ export class CodexHarness implements Harness {
           role: inv.role,
           loop: inv.loopIndex,
           cwd: inv.cwd,
-          model: model.identity,
+          requested_model: model.identity,
+          reported_model: null,
           sandbox: sandboxForRole(inv.role),
           structured_output: structured?.name ?? null,
         })}\n`,
@@ -114,10 +130,18 @@ export class CodexHarness implements Harness {
         args,
         cwd: inv.cwd,
         env: this.opts.env,
-        stdin: inv.prompt,
+        stdin: prompts.prompt,
         timeoutMs: inv.timeoutMs,
         signal: inv.signal,
-        onStdout: (line) => inv.onTranscript?.(`${line}\n`),
+        onStdout: (line) => {
+          inv.onTranscript?.(`${line}\n`);
+          let event: any;
+          try { event = JSON.parse(line); } catch { return; }
+          const item = event.item;
+          if (item?.type !== "command_execution" || typeof item.id !== "string") return;
+          if (event.type === "item.started") executionCapture.start(`qa:${item.id}`, String(item.command ?? ""));
+          if (event.type === "item.completed") executionCapture.end(`qa:${item.id}`, item.status === "completed" && item.exit_code === 0 ? 0 : 1);
+        },
         onStderr: (line) =>
           inv.onTranscript?.(`${JSON.stringify({ ts: new Date().toISOString(), type: "codex_stderr", text: line.slice(0, MAX_ERROR_TEXT) })}\n`),
         role: inv.role,
@@ -143,7 +167,7 @@ export class CodexHarness implements Harness {
           // The runtime's existing structured-output recovery owns a missing submission.
         }
       }
-      return { finalText, submissions, usage, turns, model: model.identity };
+      return { finalText, submissions, usage, turns, executions: executionCapture.executions };
     } finally {
       await rm(temporary, { recursive: true, force: true });
     }

@@ -16,6 +16,28 @@ import type { HarnessResourceManifest } from "../types.js";
 import { startFakeOpenAI, type FakeStep } from "./fake-openai.js";
 import { makeWorkspace } from "./helpers.js";
 
+test("pi preserves a custom provider's max thinking level through the session and HTTP request", async () => {
+  const { ws, cleanup } = await makeWorkspace();
+  const server = await startFakeOpenAI(() => ({ text: "checked" }));
+  try {
+    const config = mergeConfig(DEFAULT_CONFIG, {
+      harness: "pi", models: { default: "fixture/gpt-5.6-luna:max" },
+      providers: { fixture: { base_url: server.baseUrl, api_key: "fake-key", models: [{
+        id: "gpt-5.6-luna", reasoning: true, thinking_level_map: { xhigh: "xhigh", max: "max" },
+      }] } },
+    });
+    const harness = await createHarness(config, ws, { runtimeOptions: { refreshOnCreate: false } });
+    assert.equal(await harness.resolveModel!(config.models.default), "fixture/gpt-5.6-luna:max");
+    const result = await harness.invoke({
+      role: "developer", loopIndex: 1, cwd: ws, systemPrompt: "You are the Developer.",
+      prompt: "Reply checked.", tools: ["read"], structuredTools: [], model: config.models.default,
+    });
+    assert.equal(result.model, "fixture/gpt-5.6-luna:max");
+    assert.equal(server.requests[0].model, "gpt-5.6-luna");
+    assert.equal(server.requests[0].reasoningEffort, "max");
+  } finally { await server.close(); await cleanup(); }
+});
+
 test("pi adapter: full loop through the real pi tool loop against a fake provider", async (t) => {
   const { ws, spec, cleanup } = await makeWorkspace();
   const resourcesDir = path.join(ws, "resources");
@@ -108,7 +130,7 @@ export default function roleTools(pi) {
               name: "bash",
               arguments: {
                 command:
-                  "cat hello.txt && ls; for f in \"${TMPDIR:-/tmp}\"/hoh-transcript-*/tester.jsonl; do test ! -e \"$f\" || printf 'PI_TESTER_TRANSCRIPT_SENTINEL\\n' >> \"$f\"; done",
+                  "mkdir -p \"$HOH_EVIDENCE_DIR/qa\" && cat hello.txt > \"$HOH_EVIDENCE_DIR/qa/hello.log\" && cat \"$HOH_EVIDENCE_DIR/qa/hello.log\"; for f in \"${TMPDIR:-/tmp}\"/hoh-transcript-*/tester.jsonl; do test ! -e \"$f\" || printf 'PI_TESTER_TRANSCRIPT_SENTINEL\\n' >> \"$f\"; done",
               },
             },
           };
@@ -124,7 +146,7 @@ export default function roleTools(pi) {
                   {
                     claim_id: "entry_file",
                     claim: "hello.txt exists with content",
-                    execution_records: [{ type: "run", path: "cat hello.txt", observation: view.lastToolResult?.slice(0, 200) ?? "" }],
+                    execution_records: [{ type: "run", path: "qa/hello.log", observation: view.lastToolResult?.slice(0, 200) ?? "" }],
                   },
                 ],
                 gap_records: [],
@@ -152,6 +174,7 @@ export default function roleTools(pi) {
   const config = mergeConfig(DEFAULT_CONFIG, {
     harness: "pi",
     loops: 1,
+    checks: [{ name: "entry", command: "test -s hello.txt", claims: { entry_file: "hello.txt exists with content" } }],
     pi: {
       agent_dir: agentDir,
       extensions: ["resources/role-tools.ts"],
@@ -202,6 +225,18 @@ export default function roleTools(pi) {
     assert.equal(generated.providers.fake.apiKey, "$FAKE_GATEWAY_KEY", "secrets stay as env references");
     assert.equal(generated.providers.fake.api, "openai-completions");
     assert.deepEqual(generated.providers.fake.models.find((m) => m.id === "fake-tester"), { id: "fake-tester", reasoning: true, contextWindow: 64000, maxTokens: 4096 });
+
+    // Constructing a changed adapter must not alter receipted run records.
+    const providerRecordBefore = await readFile(paths.piModels, "utf8");
+    const changedConfig = mergeConfig(config, { providers: { fake: { ...config.providers.fake, models: ["fake-model", "fake-tester"], model_defaults: { context_window: 64000, max_tokens: 2048 } } } });
+    const changedHarness = await createHarness(changedConfig, ws, { runtimeOptions: { refreshOnCreate: false } });
+    assert.equal(await readFile(paths.piModels, "utf8"), providerRecordBefore);
+    const { verifyCurrentRunReceipt } = await import("../runtime/run-receipt.js");
+    assert.equal((await verifyCurrentRunReceipt(ws)).ok, true);
+    const resumed = await runHoh({ workspace: ws, harness: changedHarness, config: changedConfig });
+    assert.equal(resumed.results.length, 0);
+    assert.equal((await readPiModelsJson(paths.piModels))!.providers.fake.models[0].maxTokens, 2048);
+    assert.equal((await verifyCurrentRunReceipt(ws)).ok, true);
 
     // Per-role models from config reached the provider and the record.
     assert.equal(server.requests.find((r) => r.role === "planner")!.model, "fake-model");

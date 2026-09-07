@@ -11,17 +11,17 @@
  * allowlists, isolated worktree, `.hoh/` guard), binds evidence to the tested
  * candidate (tree hash before/after), and records the resulting state.
  */
-import { copyFile, cp, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { copyFile, cp, mkdir, mkdtemp, readFile, readdir, rm } from "node:fs/promises";
 import os from "node:os";
+import { existsSync } from "node:fs";
 import path from "node:path";
 import { randomBytes } from "node:crypto";
-import type { Harness, RoleInvocation, RoleResult } from "../harness/types.js";
-import { CODING_TOOLS, INSPECT_TOOLS, READ_ONLY_TOOLS, emptyUsage } from "../harness/types.js";
+import type { Harness, RoleResult } from "../harness/types.js";
+import { CODING_TOOLS, INSPECT_TOOLS, READ_ONLY_TOOLS } from "../harness/types.js";
 import type {
   BudgetLedger,
   CheckResult,
   ClaimCatalog,
-  ClaimRecord,
   CoverageState,
   DeveloperRecord,
   EvidenceBundle,
@@ -30,17 +30,19 @@ import type {
   PlannerOverlay,
   PlannerRecord,
   ProtocolReceipt,
-  QaStatus,
-  RoleUsage,
   RunConfig,
 } from "../types.js";
-import { EXECUTION_EVIDENCE_TYPES } from "../types.js";
+import { invokeRole, installCapturedTranscript, parseJsonBlock, abortMessage } from "./role.js";
+export { parseJsonBlock } from "./role.js";
+import { normalizeEvidence } from "./evidence.js";
+export { normalizeEvidence } from "./evidence.js";
 import { BudgetExhaustedError, BudgetTracker, formatBudgetExhaustion } from "./budget.js";
 import { runCheck, runChecks } from "./checks.js";
+import { requirePlanApproval, type ApprovePlan } from "./approval.js";
 import { buildCandidateDiff } from "./candidate-diff.js";
 import { ensureClaimState } from "./claims.js";
 import { assertValidConfig, type ConfigPatch, DEFAULT_CONFIG, type HohConfig, mergeConfig, modelForRole } from "./config.js";
-import { claimCatalogSha256, rebuildCoverage } from "./coverage.js";
+import { rebuildCoverage } from "./coverage.js";
 import { bindEvidenceFiles, prepareEvidenceDirectory, sanitizeEvidenceDirectory } from "./evidence-files.js";
 import {
   artifactTreeHash,
@@ -59,7 +61,6 @@ import {
 } from "./git.js";
 import { applyEvidence, emptyLedger } from "./ledger.js";
 import {
-  assertRolePromptWithinLimit,
   renderDevelopmentDocument,
   renderDeveloperPrompts,
   renderPlannerPrompts,
@@ -67,7 +68,7 @@ import {
 } from "./prompts.js";
 import { buildPromptSnapshot } from "./prompt-snapshot.js";
 import { assertProtocolReceiptIntegrity, buildProtocolReceipt, canonicalSha256, hasExplicitProtocol } from "./protocol.js";
-import { configuredProviderSecretValues, redactStorageText, type ExplicitSecretValues } from "./redaction.js";
+import { configuredProviderSecretValues, type ExplicitSecretValues } from "./redaction.js";
 import { renderRunReadme, renderTesterReport } from "./report.js";
 import { assertSafeRunRecordLayout, refreshRunReceipt, verifyCurrentRunReceipt } from "./run-receipt.js";
 import { plannerTools, SUBMIT_EVIDENCE_TOOL, SUBMIT_PLAN_TOOL, testerTools } from "./schemas.js";
@@ -111,6 +112,8 @@ export interface RunOptions {
   signal?: AbortSignal;
   /** Internal experiment policy. Normal runs must leave this unset. */
   experimentPolicy?: ExperimentLoopPolicy;
+  /** Required when human_checkpoint is enabled; return true only after reviewing the supplied plan. */
+  approvePlan?: ApprovePlan;
 }
 
 export interface LoopResult {
@@ -128,8 +131,6 @@ export interface RunResult {
   budget: BudgetLedger;
 }
 
-const FAILED_TRANSCRIPT_CAPTURE = Symbol("hoh.failedTranscriptCapture");
-
 interface Ctx {
   ws: string;
   paths: RunPaths;
@@ -143,6 +144,7 @@ interface Ctx {
   storageSecrets: ExplicitSecretValues;
   experimentPolicy?: ExperimentLoopPolicy;
   signal?: AbortSignal;
+  approvePlan?: ApprovePlan;
 }
 
 function assertExperimentLoopPolicy(policy: ExperimentLoopPolicy, config: HohConfig, harness: Harness): void {
@@ -180,6 +182,18 @@ export async function runHoh(opts: RunOptions): Promise<RunResult> {
   await ensureRepo(ws);
   await assertSafeRunRecordLayout(paths);
 
+  // Validate the previous checkpoint before rewriting any of its inputs.
+  // Only repositories predating run receipts may migrate without one.
+  const previousRun = await loadRun(paths);
+  const hasReceipt = existsSync(paths.receipt);
+  const receiptHistory = await git(["log", "-1", "--format=%H", "--", paths.rel(paths.receipt)], ws, { allowFail: true });
+  if (hasReceipt || previousRun?.protocol_receipt || receiptHistory.stdout.trim()) {
+    const verification = await verifyCurrentRunReceipt(ws);
+    if (!verification.ok) {
+      throw new Error(`cannot resume: run receipt verification failed: ${verification.issues.map((issue) => `${issue.code}: ${issue.message}`).join("; ")}`);
+    }
+  }
+
   // Effective config: stored run config (if any) <- overrides.
   const stored = await readJson<ConfigPatch>(paths.config);
   const base = stored ? mergeConfig(DEFAULT_CONFIG, stored) : DEFAULT_CONFIG;
@@ -190,9 +204,10 @@ export async function runHoh(opts: RunOptions): Promise<RunResult> {
     throw new Error(`configured harness is "${config.harness}" but a "${opts.harness.name}" harness was supplied`);
   }
   assertValidConfig(config, configSource);
+  if (config.human_checkpoint && !opts.approvePlan) throw new Error("human_checkpoint requires an approvePlan callback or an interactive CLI run");
   if (opts.experimentPolicy) assertExperimentLoopPolicy(opts.experimentPolicy, config, opts.harness);
 
-  let run = await loadRun(paths);
+  let run = previousRun;
   let initialized = false;
   if (!run) {
     if (!opts.specPath) throw new Error("A specification file (--spec) is required to start a new run.");
@@ -212,6 +227,7 @@ export async function runHoh(opts: RunOptions): Promise<RunResult> {
     await copyFile(path.resolve(opts.specPath), paths.spec);
     await writeJson(paths.config, config);
     await writeJson(paths.runJson, run);
+    if (opts.harness.providerModels) await writeJson(paths.piModels, opts.harness.providerModels);
     if (opts.harness.resourceManifest) await writeJson(paths.piResources, opts.harness.resourceManifest);
     await writeJson(paths.ledger, emptyLedger());
     initialized = true;
@@ -268,6 +284,7 @@ export async function runHoh(opts: RunOptions): Promise<RunResult> {
     run.protocol_receipt = protocolReceipt;
     // The detailed path manifest is a runtime record. For paper runs it is only
     // materialized after the immutable receipt comparison above has succeeded.
+    if (opts.harness.providerModels) await writeJson(paths.piModels, opts.harness.providerModels);
     if (opts.harness.resourceManifest) await writeJson(paths.piResources, opts.harness.resourceManifest);
     await writeJson(paths.config, config);
     await writeJson(paths.runJson, run);
@@ -291,15 +308,15 @@ export async function runHoh(opts: RunOptions): Promise<RunResult> {
       timeoutMs: config.timeouts.role_min * 60_000,
       signal: opts.signal,
       storageSecrets,
+      mode: config.claim_catalog,
     });
   } catch (error) {
-    if (!opts.signal?.aborted) {
-      try {
-        await refreshRunReceipt(paths, run);
-        await commitAll(ws, "chore(hoh): checkpoint initialization failure", RUNTIME_IDENTITY, [".hoh"]);
-      } catch (receiptError: any) {
-        log(`runtime: WARNING could not checkpoint initialization failure: ${receiptError?.message ?? receiptError}`);
-      }
+    try {
+      await refreshRunReceipt(paths, run);
+      const message = opts.signal?.aborted ? "checkpoint cancelled initialization" : "checkpoint initialization failure";
+      await commitAll(ws, `chore(hoh): ${message}`, RUNTIME_IDENTITY, [".hoh"]);
+    } catch (receiptError: any) {
+      log(`runtime: WARNING could not checkpoint initialization failure: ${receiptError?.message ?? receiptError}`);
     }
     throw error;
   }
@@ -338,6 +355,7 @@ export async function runHoh(opts: RunOptions): Promise<RunResult> {
     budget,
     storageSecrets,
     experimentPolicy: opts.experimentPolicy,
+    approvePlan: opts.approvePlan,
     signal: opts.signal,
   };
   const done = await lastCompletedLoop(paths);
@@ -355,10 +373,9 @@ export async function runHoh(opts: RunOptions): Promise<RunResult> {
     }
   } catch (error) {
     if (!(error instanceof BudgetExhaustedError)) {
-      if (opts.signal?.aborted) throw error;
       try {
         await writeVerifiedRunCheckpoint(paths, run, await loadLedger(paths));
-        await commitAll(ws, "chore(hoh): checkpoint failed run receipt", RUNTIME_IDENTITY, [".hoh"]);
+        await commitAll(ws, opts.signal?.aborted ? "chore(hoh): checkpoint cancelled run receipt" : "chore(hoh): checkpoint failed run receipt", RUNTIME_IDENTITY, [".hoh"]);
       } catch (receiptError: any) {
         log(`runtime: WARNING could not refresh failed run receipt: ${receiptError?.message ?? receiptError}`);
       }
@@ -500,7 +517,7 @@ export async function runLoop(ctx: Ctx, t: number): Promise<LoopResult> {
         role: "planner",
         loopIndex: t,
         finalAttempt: plannerRun.attempts,
-        systemPrompt: plannerPrompts.system,
+        systemPrompt: plannerRun.finalSystemPrompt,
         userPrompt: plannerRun.finalUserPrompt,
         explicitSecrets: ctx.storageSecrets,
       }),
@@ -533,6 +550,18 @@ export async function runLoop(ctx: Ctx, t: number): Promise<LoopResult> {
     }
 
     // ---------------------------------------------------------- DEVELOP (A_t)
+    if (config.human_checkpoint) {
+      developmentDocument = await readFile(paths.developmentDocument(t), "utf8");
+      log(`${tag} awaiting human approval of the development plan`);
+      await ctx.budget.pauseLoop(t);
+      try {
+        await requirePlanApproval({ loopIndex: t, documentPath: paths.developmentDocument(t), document: developmentDocument, signal: ctx.signal },
+          path.join(loopDir, "approval.json"), run.protocol_receipt!.protocol_sha256, ctx.approvePlan!);
+      } finally {
+        await ctx.budget.startLoop(t);
+      }
+      await commitAll(ws, `chore(loop-${pad(t)}): record human plan approval`, RUNTIME_IDENTITY, [paths.rel(path.join(loopDir, "approval.json"))]);
+    }
     let developer = await readJson<DeveloperRecord>(paths.developerJson(t));
     if (developer) {
       // The candidate identity is the artifact tree, so runtime-only commits (error records) after it are fine.
@@ -644,7 +673,7 @@ export async function runLoop(ctx: Ctx, t: number): Promise<LoopResult> {
         role: "developer",
         loopIndex: t,
         finalAttempt: developerRun.attempts,
-        systemPrompt: developerPrompts.system,
+        systemPrompt: developerRun.finalSystemPrompt,
         userPrompt: developerRun.finalUserPrompt,
         explicitSecrets: ctx.storageSecrets,
       }),
@@ -746,6 +775,7 @@ export async function runLoop(ctx: Ctx, t: number): Promise<LoopResult> {
         ctx,
         {
           role: "tester",
+          evidenceDir,
           loopIndex: t,
           cwd: wt,
           systemPrompt: testerPrompts.system,
@@ -792,7 +822,7 @@ export async function runLoop(ctx: Ctx, t: number): Promise<LoopResult> {
           role: "tester",
           loopIndex: t,
           finalAttempt: testerRun.attempts,
-          systemPrompt: testerPrompts.system,
+          systemPrompt: testerRun.finalSystemPrompt,
           userPrompt: testerRun.finalUserPrompt,
           explicitSecrets: ctx.storageSecrets,
         }),
@@ -817,6 +847,7 @@ export async function runLoop(ctx: Ctx, t: number): Promise<LoopResult> {
         }),
         evidenceDir,
         ctx.claimCatalog,
+        testerRun.result.executions,
       );
       ctx.signal?.throwIfAborted();
       evidenceBound = true;
@@ -856,8 +887,10 @@ export async function runLoop(ctx: Ctx, t: number): Promise<LoopResult> {
     await writeJson(paths.ledger, ledger);
     await writeJson(paths.checksJson(t), evidence.checks);
     await writeJson(paths.evidenceJson(t), evidence);
-    ctx.coverage = await rebuildCoverage(paths, ctx.claimCatalog);
-    await writeJson(paths.coverage, ctx.coverage);
+    if (ctx.claimCatalog.claims.length) {
+      ctx.coverage = await rebuildCoverage(paths, ctx.claimCatalog);
+      await writeJson(paths.coverage, ctx.coverage);
+    }
     await writeText(paths.testerReport(t), renderTesterReport(evidence));
     await writeText(paths.readme, await renderRunReadme(paths, run, ledger));
     await git(["add", "-f", "--", paths.rel(evidenceDir)], ws, { allowFail: true });
@@ -874,11 +907,6 @@ export async function runLoop(ctx: Ctx, t: number): Promise<LoopResult> {
       await ctx.budget.pauseLoop(t);
     } catch (budgetWriteError: any) {
       log(`${tag} runtime: WARNING could not persist elapsed budget state: ${budgetWriteError?.message ?? budgetWriteError}`);
-    }
-    const failedCapture = failedTranscriptCapture(err);
-    if (failedCapture) {
-      await restoreFailedRoleRuntimeWrites(ws, paths, t, process.env.HOH_ROLE, failedCapture, ctx.storageSecrets);
-      await ctx.budget.persist();
     }
     // A failed shell-enabled role may have staged arbitrary workspace paths.
     // Keep those working-tree changes available for a Developer retry, but
@@ -915,188 +943,12 @@ async function writeVerifiedRunCheckpoint(paths: RunPaths, run: RunConfig, ledge
 }
 
 // ---------------------------------------------------------------------------
-// Role invocation with structured-output retry
+// Structured role output
 // ---------------------------------------------------------------------------
-
-interface InvokeOutcome {
-  result: RoleResult;
-  attempts: number;
-  usage: RoleUsage;
-  /** Exact user prompt delivered on the final attempt, including any retry notice. */
-  finalUserPrompt: string;
-  transcript: TranscriptCapture | null;
-}
-
-interface RuntimeRoleInvocation extends RoleInvocation {
-  /** Runtime destination; never forwarded to the role harness. */
-  transcriptPath?: string;
-}
-
-interface TranscriptCapture {
-  finalPath: string;
-  content: string;
-}
-
-async function invokeRole(ctx: Ctx, inv: RuntimeRoleInvocation, requiredTool?: string): Promise<InvokeOutcome> {
-  let budgetAttempt: string | null = null;
-  let transcript: TranscriptCapture | null = null;
-  let started = 0;
-  let completedHarnessResults = 0;
-  const total: RoleUsage = { ...emptyUsage(), turns: 0, duration_ms: 0 };
-  let retryCount = 0;
-  let compactionCount = 0;
-  let compactionTokensBefore = 0;
-  let compactionEstimatedTokensAfter: number | undefined;
-  let attempts = 0;
-  let result: RoleResult = { finalText: "", submissions: {}, usage: emptyUsage(), turns: 0 };
-  let finalUserPrompt = inv.prompt;
-  const maxAttempts = requiredTool ? 2 : 1;
-  const { transcriptPath: _transcriptPath, onTranscript: upstreamTranscript, ...harnessInvocation } = inv;
-  const signal = inv.signal ?? ctx.signal;
-  const onTranscript = (chunk: string) => {
-    if (transcript) transcript.content += chunk;
-    upstreamTranscript?.(chunk);
-  };
-  try {
-    budgetAttempt = await ctx.budget.beginRole(inv.loopIndex, inv.role);
-    started = Date.now();
-    transcript = await beginTranscriptCapture(inv.transcriptPath);
-    while (attempts < maxAttempts) {
-      signal?.throwIfAborted();
-      attempts += 1;
-      const prompt =
-        attempts === 1
-          ? inv.prompt
-          : `${inv.prompt}\n\n## Runtime notice\n\nYour previous attempt ended without calling \`${requiredTool}\`. The runtime only accepts output delivered through that tool. Redo the work as needed and call \`${requiredTool}\` exactly once before finishing.`;
-      assertRolePromptWithinLimit(inv.role, inv.systemPrompt, prompt);
-      finalUserPrompt = prompt;
-      result = await ctx.harness.invoke({ ...harnessInvocation, prompt, onTranscript, signal });
-      for (const k of ["input", "output", "cacheRead", "cacheWrite", "totalTokens", "cost"] as const) total[k] += result.usage[k] ?? 0;
-      total.turns += result.turns;
-      retryCount += result.retryCount ?? 0;
-      compactionCount += result.compactionCount ?? 0;
-      compactionTokensBefore += result.compactionTokensBefore ?? 0;
-      if (result.compactionEstimatedTokensAfter !== undefined) {
-        compactionEstimatedTokensAfter = result.compactionEstimatedTokensAfter;
-      }
-      if (result.model) total.model = result.model;
-      completedHarnessResults += 1;
-      signal?.throwIfAborted();
-      if (ctx.run.protocol_receipt?.mode === "paper") {
-        const expected = ctx.run.protocol_receipt.models[inv.role];
-        if (!expected || result.model !== expected) {
-          throw new Error(
-            `paper protocol model mismatch for ${inv.role}: expected ${expected ?? "(none)"}, harness reported ${result.model ?? "(none)"}`,
-          );
-        }
-      }
-      if (!requiredTool || (result.submissions[requiredTool]?.length ?? 0) > 0 || parseJsonBlock(result.finalText)) break;
-      ctx.log(`[loop ${pad(inv.loopIndex)}] ${inv.role}: no ${requiredTool} call; retrying (${attempts}/${maxAttempts})`);
-    }
-    total.duration_ms = Date.now() - started;
-    if (retryCount > 0) total.retry_count = retryCount;
-    if (compactionCount > 0) {
-      total.compaction_count = compactionCount;
-      total.compaction_tokens_before = compactionTokensBefore;
-      if (compactionEstimatedTokensAfter !== undefined) total.compaction_estimated_tokens_after = compactionEstimatedTokensAfter;
-    }
-    await ctx.budget.completeRole(budgetAttempt, total);
-  } catch (error) {
-    if (budgetAttempt) {
-      try {
-        if (completedHarnessResults > 0) {
-          total.duration_ms = Math.max(0, Date.now() - started);
-          if (retryCount > 0) total.retry_count = retryCount;
-          if (compactionCount > 0) {
-            total.compaction_count = compactionCount;
-            total.compaction_tokens_before = compactionTokensBefore;
-            if (compactionEstimatedTokensAfter !== undefined) total.compaction_estimated_tokens_after = compactionEstimatedTokensAfter;
-          }
-        }
-        await ctx.budget.failRole(budgetAttempt, completedHarnessResults > 0 ? total : undefined);
-      } catch (budgetWriteError: any) {
-        ctx.log(
-          `[loop ${pad(inv.loopIndex)}] runtime: WARNING could not close budget attempt ${budgetAttempt}: ${budgetWriteError?.message ?? budgetWriteError}`,
-        );
-      }
-    }
-    const failure = error instanceof Error ? error : new Error(String(error));
-    if (transcript) Object.defineProperty(failure, FAILED_TRANSCRIPT_CAPTURE, { value: transcript });
-    throw failure;
-  }
-  return { result, attempts, usage: total, finalUserPrompt, transcript };
-}
-
-function abortMessage(error: unknown, signal: AbortSignal | undefined): string {
-  const reason = signal?.reason ?? error;
-  return reason instanceof Error ? reason.message : String(reason ?? "operation aborted");
-}
-
-async function beginTranscriptCapture(finalPath: string | undefined): Promise<TranscriptCapture | null> {
-  if (!finalPath) return null;
-  let content = "";
-  try {
-    content = await readFile(finalPath, "utf8");
-  } catch (error: any) {
-    if (error?.code !== "ENOENT") throw error;
-  }
-  return { finalPath, content };
-}
-
-async function installCapturedTranscript(capture: TranscriptCapture | null, storageSecrets: ExplicitSecretValues): Promise<void> {
-  if (!capture) return;
-  await mkdir(path.dirname(capture.finalPath), { recursive: true });
-  await rm(capture.finalPath, { force: true });
-  if (capture.content) await writeFile(capture.finalPath, redactStorageText(capture.content, storageSecrets).stored_text);
-}
-
-function failedTranscriptCapture(error: unknown): TranscriptCapture | null {
-  if (!(error instanceof Error)) return null;
-  return ((error as Error & { [FAILED_TRANSCRIPT_CAPTURE]?: TranscriptCapture })[FAILED_TRANSCRIPT_CAPTURE] ?? null);
-}
-
-async function restoreFailedRoleRuntimeWrites(
-  workspace: string,
-  paths: RunPaths,
-  loopIndex: number,
-  role: string | undefined,
-  capture: TranscriptCapture,
-  storageSecrets: ExplicitSecretValues,
-): Promise<void> {
-  if (role === "planner" || role === "tester") {
-    const workspaceChanges = await pathsChanged(workspace, [".", ":(exclude).hoh"]);
-    if (workspaceChanges.length) await restorePaths(workspace, [".", ":(exclude).hoh"]);
-  }
-  const evidenceRel = paths.rel(paths.evidenceDir(loopIndex)).replaceAll(path.sep, "/");
-  const immutableCheckRel = `${evidenceRel}/checks/`;
-  const unauthorized = (await pathsChanged(workspace, [".hoh"], { includeIgnored: true })).filter((changed) => {
-    const rel = changed.replaceAll(path.sep, "/");
-    return !(role === "tester" && rel.startsWith(`${evidenceRel}/`) && !rel.startsWith(immutableCheckRel));
-  });
-  if (unauthorized.length) {
-    await restorePaths(
-      workspace,
-      unauthorized.map((changed) => `:(literal)${changed}`),
-      { includeIgnored: true },
-    );
-  }
-  await installCapturedTranscript(capture, storageSecrets);
-}
 
 function lastSubmission<T>(result: RoleResult, tool: string): T | null {
   const list = result.submissions[tool];
   return list && list.length ? (list[list.length - 1] as T) : null;
-}
-
-/** Fallback for harnesses without tool support: a fenced ```json block in the final text. */
-export function parseJsonBlock<T>(text: string): T | null {
-  const m = /```json\s*([\s\S]*?)```/i.exec(text ?? "");
-  if (!m) return null;
-  try {
-    return JSON.parse(m[1]) as T;
-  } catch {
-    return null;
-  }
 }
 
 function validateOverlay(o: PlannerOverlay | null): PlannerOverlay | null {
@@ -1115,212 +967,8 @@ function validateOverlay(o: PlannerOverlay | null): PlannerOverlay | null {
 }
 
 // ---------------------------------------------------------------------------
-// Evidence normalization (paper appendix A.4)
+// Candidate and isolated role workspaces
 // ---------------------------------------------------------------------------
-
-interface NormalizeInput {
-  submission: EvidenceSubmission | null;
-  loopIndex: number;
-  candidateId: string;
-  checks: CheckResult[];
-  before: string;
-  after: string;
-  finalText: string;
-  usage: RoleUsage;
-  attempts: number;
-  /** paths in the main workspace touched during QA (reverted by the runtime) */
-  workspaceViolations?: string[];
-  claimCatalog?: ClaimCatalog;
-  /** Recorded candidate tree before checks; any post-check mismatch invalidates QA. */
-  expectedCandidateSha?: string;
-}
-
-export function normalizeEvidence(input: NormalizeInput): EvidenceBundle {
-  const executionEvidenceTypes = new Set<string>(EXECUTION_EVIDENCE_TYPES);
-  const fixedClaims = new Map(input.claimCatalog?.claims.map((claim) => [claim.id, claim]) ?? []);
-  const notes: string[] = [];
-  const frozen = input.before === input.after;
-  let sub = input.submission;
-  if (!sub || typeof sub !== "object") {
-    notes.push(`tester returned no structured evidence after ${input.attempts} attempt(s); recorded as a gap`);
-    sub = {
-      qa_status: "fail",
-      summary: "QA Tester did not deliver structured evidence.",
-      verified_records: [],
-      gap_records: [
-        {
-          claim_id: "tester.no_structured_output",
-          claim: "The QA Tester must deliver evidence through submit_evidence.",
-          execution_records: [{ type: "log", path: "tester.final_text", observation: (input.finalText || "(no output)").slice(0, 2000) }],
-          severity: "major",
-          recommended_update: "Re-run QA; make behaviors easier to observe so the tester can cite records.",
-        },
-      ],
-      planner_handoff: { preservation_constraints: [], update_targets: ["Obtain structured QA evidence for the candidate"], validation_requirements: [] },
-    };
-  }
-
-  const toRecords = (list: unknown, status: ClaimRecord["status"]): ClaimRecord[] =>
-    (Array.isArray(list) ? list : [])
-      .filter((r) => r && typeof r === "object" && typeof (r as any).claim_id === "string")
-      .map((r: any) => ({
-        claim_id: String(r.claim_id).trim(),
-        claim: String(r.claim ?? "").trim(),
-        execution_records: (Array.isArray(r.execution_records) ? r.execution_records : []).map((x: any) => ({
-          type: String(x?.type ?? "other"),
-          path: x?.path ? String(x.path) : undefined,
-          observation: String(x?.observation ?? ""),
-        })),
-        status,
-        severity: r.severity,
-        player_impact: r.player_impact,
-        recommended_update: r.recommended_update,
-      }));
-
-  const gaps = toRecords(sub.gap_records, "gap");
-  const gapIds = new Set(gaps.map((g) => g.claim_id));
-  // A claim cannot be both verified and a gap: the gap wins.
-  const verifiedCandidates = toRecords(sub.verified_records, "verified").filter((v) => {
-    if (gapIds.has(v.claim_id)) {
-      notes.push(`claim ${v.claim_id} was listed as both verified and gap; kept as gap`);
-      return false;
-    }
-    return true;
-  });
-  const verified: ClaimRecord[] = [];
-  for (const record of verifiedCandidates) {
-    const observedTypes = new Set(record.execution_records.map((e) => e.type));
-    if (!record.execution_records.some((e) => executionEvidenceTypes.has(e.type))) {
-      gaps.push({ ...record, status: "gap", severity: "minor" });
-      gapIds.add(record.claim_id);
-      notes.push(`claim ${record.claim_id}: source-only evidence downgraded to gap`);
-      continue;
-    }
-    const missing = (fixedClaims.get(record.claim_id)?.requires ?? []).filter((type) => !observedTypes.has(type));
-    if (missing.length) {
-      gaps.push({ ...record, status: "gap", severity: "minor" });
-      gapIds.add(record.claim_id);
-      notes.push(`claim ${record.claim_id}: missing required evidence types: ${missing.join(", ")}`);
-      continue;
-    }
-    verified.push(record);
-  }
-
-  for (const c of input.checks) {
-    if (c.status === "pass") continue;
-    const id = `check.${c.name}`;
-    const outputPath = c.stderr_tail ? c.stderr_path : c.stdout_path;
-    const outputSha256 = c.stderr_tail ? c.stderr_sha256 : c.stdout_sha256;
-    const executionRecord = {
-      type: "check",
-      path: outputPath ?? c.name,
-      ...(outputSha256 ? { sha256: outputSha256 } : {}),
-      observation: `${c.status}, exit ${c.exit_code ?? "-"}: ${(c.stderr_tail || c.stdout_tail).trim().slice(-500)}`,
-    };
-    const recommendedUpdate = `Make "${c.command}" succeed on the artifact.`;
-    const existingGap = gaps.find((gap) => gap.claim_id === id);
-    if (existingGap) {
-      if (!existingGap.execution_records.some((record) => record.type === "check" && record.path === executionRecord.path)) {
-        existingGap.execution_records.push(executionRecord);
-      }
-      existingGap.severity = "blocker";
-      existingGap.recommended_update = recommendedUpdate;
-      notes.push(`claim ${id}: deterministic check failure enforced as blocker`);
-    } else {
-      gaps.push({
-        claim_id: id,
-        claim: `Deterministic check "${c.name}" passes (${c.command}).`,
-        execution_records: [executionRecord],
-        status: "gap",
-        severity: "blocker",
-        recommended_update: recommendedUpdate,
-      });
-      gapIds.add(id);
-    }
-  }
-  if (!frozen) {
-    notes.push(`candidate mutated during QA (tree ${input.before.slice(0, 12)} → ${input.after.slice(0, 12)}); observations are not bound to the candidate`);
-    gaps.push({
-      claim_id: "runtime.candidate_mutated",
-      claim: "The QA Tester leaves the frozen candidate unmodified.",
-      execution_records: [{ type: "runtime_trace", observation: `artifact tree changed during QA: ${input.before} → ${input.after}` }],
-      status: "gap",
-      severity: "blocker",
-      recommended_update: "QA must only build, run, and inspect; it must not edit files.",
-    });
-  }
-
-  if (input.expectedCandidateSha && input.before !== input.expectedCandidateSha) {
-    notes.push(
-      `candidate mutated during deterministic checks (tree ${input.expectedCandidateSha.slice(0, 12)} → ${input.before.slice(0, 12)})`,
-    );
-    gaps.push({
-      claim_id: "runtime.candidate_mutated_by_checks",
-      claim: "Deterministic checks leave the frozen candidate source tree unchanged.",
-      execution_records: [
-        {
-          type: "runtime_trace",
-          observation: `artifact tree changed during checks: ${input.expectedCandidateSha} → ${input.before}`,
-        },
-      ],
-      status: "gap",
-      severity: "blocker",
-      recommended_update: "Checks and worktree_setup must not modify tracked candidate source files.",
-    });
-  }
-
-  if (input.workspaceViolations?.length) {
-    notes.push(`tester modified the main workspace (${input.workspaceViolations.slice(0, 10).join(", ")}); changes were reverted`);
-    gaps.push({
-      claim_id: "runtime.workspace_mutated_by_tester",
-      claim: "The QA Tester does not modify the development workspace.",
-      execution_records: [{ type: "runtime_trace", observation: `reverted: ${input.workspaceViolations.slice(0, 20).join(", ")}` }],
-      status: "gap",
-      severity: "blocker",
-      recommended_update: "QA must only build, run, and inspect the isolated candidate copy.",
-    });
-  }
-
-  const finalGapIds = new Set(gaps.map((gap) => gap.claim_id));
-  const resolvedVerified = verified.filter((record) => {
-    if (!finalGapIds.has(record.claim_id)) return true;
-    notes.push(`claim ${record.claim_id} conflicted with a runtime gap; kept as gap`);
-    return false;
-  });
-
-  let qa_status: QaStatus;
-  if (!frozen || gaps.some((g) => g.severity === "blocker") || resolvedVerified.length === 0) qa_status = "fail";
-  else if (gaps.length > 0) qa_status = "partial";
-  else qa_status = "pass";
-
-  const handoff = sub.planner_handoff && typeof sub.planner_handoff === "object" ? sub.planner_handoff : ({} as any);
-  return {
-    schema_version: 1,
-    loop_index: input.loopIndex,
-    candidate_id: input.candidateId,
-    claim_catalog_sha256: input.claimCatalog ? claimCatalogSha256(input.claimCatalog) : null,
-    qa_status,
-    summary: String(sub.summary ?? "").trim(),
-    verified_records: resolvedVerified,
-    gap_records: gaps,
-    planner_handoff: {
-      preservation_constraints: strList(handoff.preservation_constraints),
-      update_targets: strList(handoff.update_targets),
-      validation_requirements: strList(handoff.validation_requirements),
-    },
-    checks: input.checks,
-    candidate_source_sha256_before: input.before,
-    candidate_source_sha256_after: input.after,
-    frozen,
-    runtime_notes: notes,
-    usage: input.usage,
-    created_at: new Date().toISOString(),
-  };
-}
-
-function strList(v: unknown): string[] {
-  return Array.isArray(v) ? v.map((x) => String(x)) : [];
-}
 
 /** Recover the exact Developer range while remaining compatible with pre-range records. */
 async function resolveDeveloperCommitRange(
@@ -1373,7 +1021,7 @@ async function prepareNoEvidencePlannerView(ctx: Ctx, loopIndex: number): Promis
     await mkdir(path.join(cwd, ".hoh"), { recursive: true });
     await copyFile(ctx.paths.spec, path.join(cwd, ctx.run.spec_path));
     try {
-      await copyFile(ctx.paths.claims, path.join(cwd, ctx.paths.rel(ctx.paths.claims)));
+      if (ctx.claimCatalog.claims.length) await copyFile(ctx.paths.claims, path.join(cwd, ctx.paths.rel(ctx.paths.claims)));
     } catch (error: any) {
       if (error?.code !== "ENOENT") throw error;
     }

@@ -2,9 +2,10 @@
 import { randomBytes } from "node:crypto";
 import { copyFile, mkdir, readFile, readdir, stat } from "node:fs/promises";
 import path from "node:path";
-import type { Harness, RoleResult } from "../harness/types.js";
-import { CODING_TOOLS, emptyUsage } from "../harness/types.js";
-import type { BudgetLedger, DeveloperRecord, Ledger, ProtocolReceipt, Role, RoleUsage, RunConfig } from "../types.js";
+import type { Harness } from "../harness/types.js";
+import { CODING_TOOLS } from "../harness/types.js";
+import type { BudgetLedger, DeveloperRecord, Ledger, ProtocolReceipt, Role, RunConfig } from "../types.js";
+import { invokeRole, installCapturedTranscript } from "../runtime/role.js";
 import { BudgetExhaustedError, BudgetTracker } from "../runtime/budget.js";
 import { assertValidConfig, type ConfigPatch, DEFAULT_CONFIG, type HohConfig, mergeConfig, modelForRole } from "../runtime/config.js";
 import {
@@ -30,10 +31,10 @@ import {
 import { buildPromptSnapshot, promptSha256 } from "../runtime/prompt-snapshot.js";
 import { assertRolePromptWithinLimit, render, renderContextDisclosure } from "../runtime/prompts.js";
 import { buildProtocolReceipt, canonicalSha256 } from "../runtime/protocol.js";
-import { configuredProviderSecretValues, redactStorageText } from "../runtime/redaction.js";
+import { configuredProviderSecretValues } from "../runtime/redaction.js";
 import { assertSafeRunRecordLayout, refreshRunReceipt, verifyCurrentRunReceipt } from "../runtime/run-receipt.js";
 import type { RunReceipt } from "../runtime/receipt.js";
-import { readJson, RunPaths, writeJson, writeText } from "../runtime/state.js";
+import { readJson, RunPaths, writeJson } from "../runtime/state.js";
 import { EXPERIMENT_CONDITIONS, type ExperimentCondition } from "./manifest.js";
 
 export const EXPERIMENT_CONDITION_POLICY_VERSION = "arxiv:2609.01481v1/conditions-v1" as const;
@@ -519,7 +520,7 @@ interface VanillaDeveloperInput extends VanillaRunInput {
 }
 
 async function runVanillaDeveloper(input: VanillaDeveloperInput): Promise<void> {
-  const { workspace, config, protocolReceipt, harness, signal, paths, budget, loopIndex, log } = input;
+  const { workspace, config, harness, signal, paths, budget, loopIndex, log } = input;
   signal?.throwIfAborted();
   process.env.HOH_LOOP = String(loopIndex);
   process.env.HOH_ROLE = "developer";
@@ -544,48 +545,24 @@ async function runVanillaDeveloper(input: VanillaDeveloperInput): Promise<void> 
   });
   assertRolePromptWithinLimit("developer", systemPrompt, userPrompt);
 
-  const attemptId = await budget.beginRole(loopIndex, "developer");
   const runtimeDirtyBefore = new Set(await pathsChanged(workspace, [".hoh"], { includeIgnored: true }));
-  const transcriptPath = paths.transcript(loopIndex, "developer");
-  let transcript = "";
-  let result: RoleResult | null = null;
-  let usage: RoleUsage | null = null;
   let developerHeadMoved = false;
-  const started = Date.now();
+  let invocation: Awaited<ReturnType<typeof invokeRole>>;
   try {
-    result = await harness.invoke({
-      role: "developer",
-      loopIndex,
-      cwd: workspace,
-      systemPrompt,
-      prompt: userPrompt,
-      tools: CODING_TOOLS,
-      structuredTools: [],
+    invocation = await invokeRole({
+      ws: workspace, paths, run: input.run, harness, budget, log, signal,
+      storageSecrets: configuredProviderSecretValues(config),
+    }, {
+      role: "developer", loopIndex, cwd: workspace, systemPrompt, prompt: userPrompt,
+      tools: CODING_TOOLS, structuredTools: [],
       timeoutMs: config.timeouts.role_min * 60_000,
-      model: modelForRole(config, "developer"),
-      signal,
-      onTranscript: (chunk) => {
-        transcript += chunk;
-      },
+      model: modelForRole(config, "developer"), signal,
+      transcriptPath: paths.transcript(loopIndex, "developer"),
     });
-    signal?.throwIfAborted();
-    usage = roleUsage(result, Date.now() - started);
-    if (protocolReceipt.mode === "paper") {
-      const expected = protocolReceipt.models.developer;
-      if (!expected || result.model !== expected) {
-        throw new Error(`paper protocol model mismatch for developer: expected ${expected ?? "(none)"}, harness reported ${result.model ?? "(none)"}`);
-      }
-    }
-    await budget.completeRole(attemptId, usage);
-  } catch (error) {
-    await budget.failRole(attemptId, usage ?? (result ? roleUsage(result, Date.now() - started) : undefined));
-    if (transcript) await writeText(transcriptPath, redactStorageText(transcript, configuredProviderSecretValues(config)).stored_text);
-    throw error;
   } finally {
     developerHeadMoved = await reanchorVanillaHead(workspace, preDevelopmentCommit);
   }
-
-  if (!usage) throw new Error(`vanilla Developer loop ${loopIndex} completed without usage accounting`);
+  const { result, usage } = invocation;
   const unauthorized = (await pathsChanged(workspace, [".hoh"], { includeIgnored: true })).filter((changed) => {
     const relative = changed.replaceAll(path.sep, "/");
     return !runtimeDirtyBefore.has(changed) && relative !== paths.rel(paths.budget).replaceAll(path.sep, "/");
@@ -600,7 +577,7 @@ async function runVanillaDeveloper(input: VanillaDeveloperInput): Promise<void> 
   }
   await budget.persist();
   const storageSecrets = configuredProviderSecretValues(config);
-  if (transcript) await writeText(transcriptPath, redactStorageText(transcript, storageSecrets).stored_text);
+  await installCapturedTranscript(invocation.transcript, storageSecrets);
   await git(["reset", "-q", "HEAD", "--", ".hoh"], workspace, { allowFail: true });
   const commit = await commitAll(
     workspace,
@@ -638,32 +615,12 @@ async function runVanillaDeveloper(input: VanillaDeveloperInput): Promise<void> 
       role: "developer",
       loopIndex,
       finalAttempt: 1,
-      systemPrompt,
-      userPrompt,
+      systemPrompt: invocation.finalSystemPrompt,
+      userPrompt: invocation.finalUserPrompt,
       explicitSecrets: storageSecrets,
     }),
   );
   await commitAll(workspace, `chore(loop-${String(loopIndex).padStart(2, "0")}): record vanilla Developer`, RUNTIME_IDENTITY, [".hoh"]);
-}
-
-function roleUsage(result: RoleResult, durationMs: number): RoleUsage {
-  return {
-    ...emptyUsage(),
-    ...result.usage,
-    turns: result.turns,
-    duration_ms: Math.max(0, durationMs),
-    ...(result.retryCount ? { retry_count: result.retryCount } : {}),
-    ...(result.compactionCount
-      ? {
-          compaction_count: result.compactionCount,
-          compaction_tokens_before: result.compactionTokensBefore ?? 0,
-          ...(result.compactionEstimatedTokensAfter === undefined
-            ? {}
-            : { compaction_estimated_tokens_after: result.compactionEstimatedTokensAfter }),
-        }
-      : {}),
-    ...(result.model ? { model: result.model } : {}),
-  };
 }
 
 async function checkpointVanilla(paths: RunPaths, run: RunConfig): Promise<RunReceipt> {

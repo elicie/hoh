@@ -44,6 +44,7 @@ test("configured credentials stay exact in memory but are redacted from prompt a
       harness,
       config: {
         harness: "mock",
+        claim_catalog: "generate",
         loops: 1,
         providers: {
           fixture: {

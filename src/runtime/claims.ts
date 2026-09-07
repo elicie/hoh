@@ -3,7 +3,7 @@ import { appendFile, mkdir } from "node:fs/promises";
 import type { Harness } from "../harness/types.js";
 import { READ_ONLY_TOOLS } from "../harness/types.js";
 import type { ClaimCatalog, CoverageState } from "../types.js";
-import { emptyCoverage, loadClaimCatalog, makeClaimCatalog, rebuildCoverage } from "./coverage.js";
+import { emptyCoverage, loadClaimCatalog, makeClaimCatalog, rebuildCoverage, specSha256 } from "./coverage.js";
 import { renderClaimDraftPrompts } from "./prompts.js";
 import { redactStorageText, type ExplicitSecretValues } from "./redaction.js";
 import { claimsTools, SUBMIT_CLAIMS_TOOL } from "./schemas.js";
@@ -22,6 +22,7 @@ export interface ClaimGenerationOptions {
   signal?: AbortSignal;
   /** Explicit provider credential values removed from persisted transcripts. */
   storageSecrets?: ExplicitSecretValues;
+  mode?: "off" | "existing" | "generate";
 }
 
 export interface ClaimState {
@@ -79,9 +80,15 @@ export async function generateClaimCatalog(options: ClaimGenerationOptions): Pro
 }
 
 export async function ensureClaimState(options: ClaimGenerationOptions): Promise<ClaimState> {
+  const disabled = (): ClaimState => {
+    const catalog: ClaimCatalog = { schema_version: 1, spec_sha256: specSha256(options.spec), claims: [] };
+    return { catalog, coverage: emptyCoverage(catalog), created: false };
+  };
+  if (options.mode === "off") return disabled();
   let catalog = await loadClaimCatalog(options.paths, options.spec);
   let created = false;
   if (!catalog) {
+    if (options.mode !== "generate") return disabled();
     catalog = await generateClaimCatalog(options);
     options.signal?.throwIfAborted();
     await writeJson(options.paths.claims, catalog);

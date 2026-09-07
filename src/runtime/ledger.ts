@@ -2,7 +2,7 @@
  * Issue ledger: the cross-loop memory of gaps. Gap records open issues,
  * verified records close them, and a gap on a closed issue marks a regression.
  */
-import type { ClaimRecord, Issue, Ledger, Severity } from "../types.js";
+import type { CheckResult, ClaimRecord, Issue, Ledger, Severity } from "../types.js";
 
 const SEVERITY_RANK: Record<Severity, number> = { blocker: 0, major: 1, minor: 2 };
 
@@ -19,8 +19,10 @@ export interface LedgerDelta {
 
 export function applyEvidence(
   ledger: Ledger,
-  bundle: { loop_index: number; verified_records: ClaimRecord[]; gap_records: ClaimRecord[] },
+  bundle: { loop_index: number; verified_records: ClaimRecord[]; gap_records: ClaimRecord[]; checks?: CheckResult[]; frozen?: boolean },
 ): LedgerDelta {
+  // JSON round trips restore Object.prototype; claim IDs must remain data keys.
+  ledger.issues = Object.assign(Object.create(null), ledger.issues);
   const loop = bundle.loop_index;
   const delta: LedgerDelta = { opened: [], reopened: [], closed: [], still_open: [] };
   const gaps = collapseRecords(bundle.gap_records, "gap");
@@ -77,14 +79,30 @@ export function applyEvidence(
     }
   }
 
-  for (const ok of verified) {
-    const existing = ledger.issues[ok.claim_id];
+  const resolvedIds = new Set(verified.map((record) => record.claim_id));
+  // Unbound checks may resolve their own runtime failure, but must never
+  // manufacture a verified product claim or turn a failing QA into PASS.
+  if (bundle.frozen && !gaps.some((gap) => gap.claim_id.startsWith("runtime.") && gap.severity === "blocker")) {
+    for (const check of bundle.checks ?? []) {
+      const id = `check.${check.name}`;
+      if (gapIds.has(id) || check.status !== "pass" || check.exit_code !== 0 || check.execution?.exit_code !== 0) continue;
+      if (ledger.issues[id]?.claim !== `Deterministic check "${check.name}" passes (${check.command}).`) continue;
+      const intact = ["stdout", "stderr"].every((stream) => {
+        const file = stream === "stdout" ? check.stdout_path : check.stderr_path;
+        const sha = stream === "stdout" ? check.stdout_sha256 : check.stderr_sha256;
+        return file && sha && check.execution!.files.some((captured) => captured.path === file && captured.sha256 === sha);
+      });
+      if (intact) resolvedIds.add(id);
+    }
+  }
+  for (const id of resolvedIds) {
+    const existing = ledger.issues[id];
     if (!existing || existing.status === "closed") continue;
     existing.status = "closed";
     existing.closed_loop = loop;
     existing.consecutive_gap_loops = 0;
     existing.history.push({ loop, status: "closed" });
-    delta.closed.push(ok.claim_id);
+    delta.closed.push(id);
   }
 
   return delta;

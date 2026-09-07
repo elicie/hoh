@@ -3,11 +3,13 @@
  * Used by the CLI and by tests so both take the same path.
  */
 import path from "node:path";
+import { createHash } from "node:crypto";
+import { ensureRepo, git } from "../runtime/git.js";
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { piCompactionForRole, type HohConfig } from "../runtime/config.js";
 import { assertPiResourceManifestCurrent, buildPiResourceManifest } from "../runtime/pi-resources.js";
-import { materializePiModels, type PiModelsJson } from "../runtime/providers.js";
-import { RunPaths } from "../runtime/state.js";
+import { buildPiModelsJson, readPiModelsJson, type PiModelsJson } from "../runtime/providers.js";
+import { RunPaths, writeJson } from "../runtime/state.js";
 import { ROLES, type Role } from "../types.js";
 import { CodexHarness, detectCodexVersion, type CodexHarnessOptions } from "./codex.js";
 import { createDemoMockHarness } from "./mock.js";
@@ -32,8 +34,19 @@ export interface FactoryOptions {
 
 export async function createModelRuntime(config: HohConfig, workspace: string, opts: FactoryOptions = {}): Promise<RuntimeBuild> {
   const paths = new RunPaths(workspace);
-  const models = await materializePiModels(config, paths.piModels, { log: opts.log, fetchImpl: opts.fetchImpl });
-  const modelsPath = models ? paths.piModels : null;
+  const models = Object.keys(config.providers).length ? await buildPiModelsJson(config, {
+    log: opts.log, fetchImpl: opts.fetchImpl, previous: await readPiModelsJson(paths.piModels),
+  }) : null;
+  let modelsPath: string | null = null;
+  if (models) {
+    // Harness construction precedes resume verification. Keep prepared models
+    // in Git's private cache until runHoh accepts the previous checkpoint.
+    await ensureRepo(workspace);
+    const digest = createHash("sha256").update(JSON.stringify(models)).digest("hex");
+    const cache = await git(["rev-parse", "--git-path", `hoh-models/${digest}.json`], workspace);
+    modelsPath = path.resolve(workspace, cache.stdout.trim());
+    await writeJson(modelsPath, models);
+  }
   const agentDir = config.pi.agent_dir;
   const modelRuntime = await ModelRuntime.create({
     ...(modelsPath ? { modelsPath } : {}),
@@ -51,10 +64,11 @@ export async function createHarness(config: HohConfig, workspace: string, opts: 
     return new CodexHarness({ ...codex, version });
   }
   const resourceManifest = await buildPiResourceManifest(config, workspace);
-  const { modelRuntime } = await createModelRuntime(config, workspace, opts);
+  const { modelRuntime, models } = await createModelRuntime(config, workspace, opts);
   return new PiHarness({
     agentDir: config.pi.agent_dir,
     modelRuntime,
+    providerModels: models ?? undefined,
     resourceManifest,
     verifyResourceManifest: (role: Role) => assertPiResourceManifestCurrent(resourceManifest, role),
     sessionPolicy: {

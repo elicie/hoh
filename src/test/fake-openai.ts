@@ -16,6 +16,7 @@ export interface FakeRequestView {
   role: "planner" | "developer" | "tester" | "unknown";
   /** model id requested by the client */
   model: string;
+  reasoningEffort?: string;
   /** number of assistant messages already in the conversation */
   step: number;
   toolNames: string[];
@@ -69,6 +70,7 @@ export async function startFakeOpenAI(script: FakeScript, opts: { models?: strin
       const view: FakeRequestView = {
         role: detectRole(system),
         model: String(payload.model),
+        reasoningEffort: payload.reasoning_effort,
         step,
         toolNames: (payload.tools ?? []).map((t: any) => t.function?.name ?? t.name),
         systemPrompt: system,

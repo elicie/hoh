@@ -1,6 +1,6 @@
 # HoH 개선 로드맵
 
-기준 시점: 2026-09-03
+기준 시점: 2026-09-06
 
 이 문서는 현재 저장소의 구현 상태를 [arXiv:2609.01481v1](https://arxiv.org/abs/2609.01481v1)에 맞춰 다시 정리한 실행 로드맵이다. 프로젝트 사이트의 [Harness of Harness 초안 PDF](https://flesymeb.github.io/HarnessOfHarness/assets/paper/harness-of-harness.pdf)는 이전 설계 아이디어를 확인하는 보조 자료로만 사용한다. 공식 저장소의 구현은 아직 공개 예고 상태이므로, 이 프로젝트의 목표는 원본 코드와의 바이트 단위 호환이 아니라 논문에 기술된 동작 계약을 재현하는 것이다.
 
@@ -34,7 +34,7 @@
 
 ## 현재 판단
 
-현재 런타임은 세 역할의 분리 호출, 이전 후보 warm-start, QA용 동결 worktree, 실제 후보 diff, 구조화된 증거, 반복 gap 에스컬레이션, 점진적 역할 컨텍스트, 역할별 pi 자원·compaction 정책, Git 이력, 재개와 논문 실행 계약 고정을 갖췄다. 명시한 Core 계약과 7번, 10번, 11번, 15번, 16번, Codex 하네스 최소 경로, 18번의 다섯 조건 실행·외부 평가 orchestration·원시 결과 집계까지 완료됐다. 따라서 실행 인프라 기준으로 18번까지의 필수 구현은 끝났다. 8B는 Draft opt-in이고, 12·13은 미착수 필요 시 항목이며, 17은 `examples/1945`까지 부분 완료돼 추가 kit만 필요 시 확장한다. 두 번째 대체 어댑터도 실제 비교 수요가 생길 때 진행한다. 다만 런타임 완성만으로 논문 성능 수치가 입증되지는 않는다. 그런 주장은 별도로 공급한 공식 benchmark evaluator 또는 독립 human rubric을 결과 생성 전에 등록하고 실제 표본 실행을 완료해야 한다.
+현재 런타임은 세 역할의 분리 호출, 이전 후보 warm-start, QA용 동결 worktree, 실제 후보 diff, 실행 출처에 연결된 증거, 반복 gap 에스컬레이션, 역할 컨텍스트·pi 자원·compaction 정책, Git 이력과 재개를 갖췄다. Core 실행 구조와 7번, 10번, 11번, 15번, 16번, 18번의 다섯 조건 실행·외부 평가·집계 인프라는 구현돼 있다. 1번은 사전 검사와 claim의 명시적 연결을 강제한다. 검사 자체의 정확성과 요구사항 포괄성은 별도로 검토해야 한다. Codex는 `extended` 실행을 지원하지만 CLI가 실제 모델을 보고하지 않아 `paper`와 해당 실험은 시작 전에 거부한다. 따라서 14번의 엄격한 대체 하네스 비교는 아직 부분 완료다. 8B, 12·13과 17의 추가 kit는 구체적인 수요가 생길 때 진행한다. 논문 성능 수치를 주장하려면 공식 benchmark evaluator 또는 독립 human rubric을 결과 생성 전에 등록하고 실제 표본 실행을 완료해야 한다.
 
 ## 우선순위 요약
 
@@ -53,7 +53,7 @@
 | 11 | Developer 컨텍스트·토큰 절감 | Ops | 완료 | 유지 | – | 9 |
 | 12 | MCP 브리지 | Extension | 필요 시 | P3 | 1일 | 10 |
 | 13 | 샌드박스 실행 가이드 | Ops | 필요 시 | P3 | 1일 | 7 |
-| 14 | 추가 하네스 어댑터 | Experiment | Codex 완료 | 유지 | – | 4 |
+| 14 | 추가 하네스 어댑터 | Experiment | Codex extended 완료 / paper 미지원 | P2 | 모델 보고 지원 필요 | 4 |
 | 15 | 입력 receipt와 무결성 검증 | Full | 완료 | 유지 | – | 3, 4 |
 | 16 | 실행 리포트 확장 | Ops | 완료 | 유지 | – | 3, 15 |
 | 17 | 프로젝트 유형별 검증 키트 | Extension | 부분 완료 | P3 | 0.5일/개 | – |
@@ -63,7 +63,9 @@
 
 ## 1. 실행 증거 등급 강제 — 완료
 
-논문의 증거 기반 QA 계약에 맞춰, `verified` claim은 실행 계열 증거가 있어야 한다. 소스·설정·manifest만 인용한 레코드는 `insufficient_evidence` gap으로 강등하고 QA 상태를 다시 계산한다. 시각 claim의 screenshot 요구, 파일 존재와 해시 검증, 관련 회귀 테스트도 구현돼 있다.
+`checks[].claims`에 claim ID와 검사 기준을 사전 등록한다. `verified`가 되려면 해당 ID에 연결된 모든 결정적 검사가 성공하고, 보존한 출력 파일의 해시가 실행 당시 값과 일치해야 한다. 런타임이 검사 증거를 덧붙이고 등록된 기준으로 claim 문장을 저장하므로, Tester가 같은 ID에 과장된 설명을 붙여도 검증 범위가 넓어지지 않는다. 연결되지 않은 claim은 QA shell이 성공해도 gap이고, 연결된 검사 실패는 해당 claim ID의 blocker gap이다. 고정 카탈로그가 있으면 기준 문장이 일치해야 하며 screenshot 등 요구 타입도 충족해야 한다. 카탈로그 자체는 계속 선택 기능이다.
+
+실행 출처와 사전 연결을 함께 강제하므로 `printf PASS`, 관련 없는 문법 검사, 일부 연결 검사만 성공한 경우가 기능 claim을 검증 확정하지 못한다. 검사 작성자는 명령이 등록된 기준을 실제로 검사하는지 확인하고 검사 코드를 통제해야 한다. 임의의 검사 코드가 올바르고 모든 요구사항을 포괄한다는 보장은 별도의 문제다.
 
 유지 조건:
 
@@ -80,6 +82,7 @@
 - 논문의 `C_t`를 전역 고정 집합으로 해석하지 않는다.
 - 카탈로그 밖의 자유 claim을 허용해 `Claims(S, D_t)`의 루프별 발견을 보존한다.
 - 카탈로그는 편의 기능이며, 없다고 해서 Core 실행을 막지 않는다.
+- `claim_catalog`의 기본 동작은 `existing`이다. 기존 파일이 있으면 검증·사용하고, 없으면 생성 없이 Core를 실행한다. `off`는 로드를 끄며, `generate`를 명시했을 때만 누락된 카탈로그를 생성하고 생성 실패를 실행 오류로 처리한다. `init-claims`로 미리 생성·검토할 수도 있다.
 
 ## 3. 증거 파일 보존과 해시 — 완료
 
@@ -147,7 +150,7 @@ Developer 전후의 전체 Git SHA를 candidate record에 고정하고, QA workt
 - 각 역할 경계에서 한도를 재검사한다. 다음 역할을 시작할 수 없으면 `error.json`이나 QA verdict를 만들지 않고 재개 가능한 `budget_exhausted` run/lifecycle 상태로 끝낸다. 정확히 한도에 도달한 최종 역할은 완료로 인정하고, 초과한 사용량은 exhausted로 남긴다.
 - status와 Markdown report는 현재 역할·활성 경과 시간·configured ceiling, run/loop totals, exhaustion 원인을 표시한다. 선택적 loop-0 claim catalog 초안 호출은 loop-1에서 시작하는 이 원장의 범위 밖임을 명시한다.
 
-모델이 낸 QA 실패나 개발 결과를 전송 오류처럼 자동 재시도하지 않는다. 사람 체크포인트는 `extended` 프로토콜에서만 선택적으로 제공한다.
+모델이 낸 QA 실패나 개발 결과를 전송 오류처럼 자동 재시도하지 않는다. `extended`에서 `human_checkpoint: true`를 설정하면 대화형 foreground CLI 또는 `runHoh`의 `approvePlan` 콜백으로 Developer 직전 계획을 승인한다. 승인 기록은 정확한 계획 내용과 protocol hash에 묶이며, 거부·취소 시 Developer가 시작하지 않는다. 승인 대기 시간은 활성 예산에서 제외한다. HoH와 vanilla의 역할 호출·usage·transcript·실패 복구는 공통 모듈을 사용하고, 실패한 역할이 커밋한 무단 `.hoh` 변경도 기준 HEAD로 복구한다.
 
 `paper` run이 예산을 소진한 뒤 resume할 때는 기존 한도 안의 미완료 시도만 이어갈 수 있다. `T`, 토큰, 비용 한도를 늘리려면 원 run을 보존한 새 run/fork로 기록한다.
 
@@ -217,7 +220,7 @@ CLI나 프로젝트 도구로 표현할 수 없는 브라우저, DB, 외부 서�
 
 장시간 또는 신뢰할 수 없는 입력을 실행할 때 필요한 격리 경계, workspace mount, secret 전달, 브라우저 의존성, 네트워크 정책을 문서화한다. Docker나 인프라 변경은 사용자의 해당 작업에 대한 명시적 승인과 프로젝트 인프라 지침 확인 없이는 실행하지 않는다.
 
-## 14. 추가 하네스 어댑터 — Codex 최소 완료
+## 14. 추가 하네스 어댑터 — Codex extended 완료, paper 미지원
 
 논문의 하네스 비교를 재현하려면 우선 Codex와 OpenCode 계열 어댑터를 대상으로 한다. Claude 등 논문 표에 없는 조합은 확장 실험으로 분리한다.
 
@@ -232,11 +235,12 @@ CLI나 프로젝트 도구로 표현할 수 없는 브라우저, DB, 외부 서�
 
 - 공식 non-interactive `codex exec` 인터페이스를 직접 spawn하고 shell command string을 사용하지 않는다. `--ephemeral`, ambient config/rule 차단, 명시적 model/reasoning, JSONL transcript, output schema와 last-message 경로를 고정한다.
 - Planner는 read-only, Developer는 workspace-write, Tester는 격리된 후보 사본의 workspace-write sandbox를 사용한다. Tester 결과의 frozen 검사는 공통 runtime이 다시 수행한다.
+- Tester에는 원본 workspace의 해당 루프 evidence 디렉터리를 `--add-dir`로 허용한다. structured output 역할은 존재하지 않는 submit 도구 호출 대신 최종 JSON schema 응답을 요구하며, prompt snapshot도 실제 변환된 입력을 보존한다.
 - Codex가 pi의 개별 built-in allowlist를 제공하는 것처럼 기록하지 않고 adapter-native sandbox capability를 protocol role contract에 고정한다.
 - CLI version, usage, structured output, timeout·외부 취소 process-group 종료를 공통 결과로 변환한다. monetary cost를 보고하지 않는 Codex run에는 cost budget을 허용하지 않는다.
-- 가짜 Codex CLI를 통한 `paper` 1-loop 통합 테스트가 동일 모델 receipt, 세 역할 분리 호출, structured deliverable과 완료 상태를 검증한다.
+- 가짜 Codex CLI를 통한 `extended` 1-loop 통합 테스트가 세 역할 호출, structured deliverable과 완료 상태를 검증한다. 별도 실제 로컬 명령 실행으로 QA 파일 출처 수집을 검사한다.
 
-Codex를 사용한 18번 end-to-end experiment 경로가 구현돼 있으므로 최소 한 개 대체 어댑터 조건은 충족한다. OpenCode 계열 두 번째 어댑터는 실제로 하네스 간 추가 비교가 필요할 때만 구현한다.
+현재 Codex CLI의 JSON 출력은 실제 실행 모델을 보고하지 않는다. 요청한 모델은 config/transcript에 남기고 실제 reported model은 미확인으로 유지한다. 이 값을 요청 모델로 채워 자기 검증하지 않으며, `paper` 및 이를 요구하는 18번 실험은 역할 호출 전에 거부한다. 엄격한 대체 하네스 비교는 독립적인 모델 보고를 지원한 뒤 검증해야 한다. OpenCode 계열 두 번째 어댑터는 실제 추가 비교 수요가 생길 때 구현한다.
 
 ## 15. 입력 receipt와 무결성 검증 — 완료
 
@@ -290,7 +294,7 @@ exact prompt는 메모리에서 먼저 해시하고, 저장 snapshot과 역할·
 
 ## 완료 판정 기준
 
-- **Core 완료**: 4, 6, 8A, 9가 자동 테스트와 함께 완료됨
+- **Core 완료**: 1, 3, 4, 6, 8A, 9가 자동 테스트와 함께 완료되고 가짜 실행 로그가 기능 claim을 검증 확정하지 못함
 - **논문 전체 시스템에 근접**: Core에 10, 15가 추가 완료
 - **논문 실험 프로토콜 실행 가능**: 14의 최소 1개 대체 어댑터와 18의 실행·외부 평가 격리가 자동 테스트로 검증됨
 - **논문 성능 수치 비교 가능**: 공식 benchmark evaluator 또는 독립 human rubric을 사전 등록하고 실제 표본 실행을 완료함
@@ -298,7 +302,7 @@ exact prompt는 메모리에서 먼저 해시하고, 저장 snapshot과 역할·
 
 ## 권장 진행 순서
 
-1. 완료된 Core·실험 계약과 자동 회귀 검증을 유지한다.
+1. 사전 등록된 검사 기준과 실제 검사 코드의 대응을 검토하고, 구현된 Core·실험 계약의 자동 회귀 검증을 유지한다.
 2. 성능 비교가 필요하면 공식 benchmark evaluator 또는 독립 human rubric을 먼저 고정하고 **18번**의 새 immutable plan으로 실행한다.
 3. 두 번째 대체 하네스가 필요한 비교에서만 **14번**을 확장한다.
 4. 초안식 **8B 후보 복구**는 결정적 회귀가 관찰될 때만 opt-in하고, 12·13과 17의 추가 kit는 구체적인 사용 사례가 생길 때만 진행한다.

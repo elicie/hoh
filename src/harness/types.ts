@@ -1,3 +1,4 @@
+import type { PiModelsJson } from "../runtime/providers.js";
 /**
  * Harness adapter contract.
  *
@@ -7,7 +8,7 @@
  * agent (pi, a CLI, a mock).
  */
 import type { TSchema } from "typebox";
-import type { HarnessResourceManifest, Role, UsageTotals } from "../types.js";
+import type { EvidenceExecution, HarnessResourceManifest, Role, UsageTotals } from "../types.js";
 
 export type BuiltinTool = "read" | "bash" | "edit" | "write" | "grep" | "find" | "ls";
 
@@ -41,6 +42,8 @@ export interface RoleInvocation {
   signal?: AbortSignal;
   /** harness-specific model pattern for this role (from config); undefined = harness default */
   model?: string;
+  /** Runtime-owned QA evidence destination, distinct from the frozen candidate. */
+  evidenceDir?: string;
 }
 
 export interface RoleResult {
@@ -51,6 +54,8 @@ export interface RoleResult {
   submissions: Record<string, unknown[]>;
   usage: UsageTotals;
   turns: number;
+  /** Trusted adapter events from actual executions; never copy these from model submissions. */
+  executions?: EvidenceExecution[];
   /** Same-session transient retries reported by the adapter. Detailed events remain in the transcript. */
   retryCount?: number;
   /** Successful automatic context compactions performed inside this role session. */
@@ -71,12 +76,18 @@ export interface Harness {
   readonly name: string;
   /** Adapter/package version recorded in the immutable protocol receipt. */
   readonly version?: string;
+  /** An adapter must not claim its requested model was independently reported. */
+  readonly modelReporting?: "session" | "unavailable";
   /** Exact role resources resolved before run start, when the adapter supports them. */
   readonly resourceManifest?: HarnessResourceManifest;
+  /** Prepared provider configuration; persisted only after resume verification. */
+  readonly providerModels?: PiModelsJson;
   /** Resolve a configured pattern to the concrete model/reasoning identity used by this adapter. */
   resolveModel?(pattern?: string): Promise<string | null>;
   /** Override the default pi-style tool receipt when an adapter enforces rights through another mechanism. */
   rolePolicy?(role: Role): HarnessRolePolicy;
+  /** Idempotent adapter output-contract adaptation, applied before prompt limits and snapshots. */
+  preparePrompts?(inv: RoleInvocation): { systemPrompt: string; prompt: string };
   invoke(inv: RoleInvocation): Promise<RoleResult>;
 }
 

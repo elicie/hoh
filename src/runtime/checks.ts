@@ -9,6 +9,7 @@ import path from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import type { CheckResult, CheckSpec } from "../types.js";
 import { MAX_EVIDENCE_FILE_BYTES } from "./evidence-files.js";
+import { ExecutionEvidenceCapture } from "./execution-evidence.js";
 
 const TAIL = 4000;
 
@@ -62,6 +63,7 @@ class OutputCapture {
 export interface CheckEvidenceOutput {
   directory: string;
   basename?: string;
+  category?: "checks" | "qa";
 }
 
 export function runCheck(
@@ -74,6 +76,9 @@ export function runCheck(
 ): Promise<CheckResult> {
   const started = Date.now();
   const timeoutMs = spec.timeout_ms ?? (spec.timeout_min ? spec.timeout_min * 60_000 : defaultTimeoutMs);
+  const capture = new ExecutionEvidenceCapture(evidence?.directory);
+  const executionId = `check:${evidence?.basename ?? spec.name}`;
+  capture.start(executionId, spec.command);
   return new Promise((resolve, reject) => {
     if (signal?.aborted) {
       reject(abortFailure(signal));
@@ -104,14 +109,17 @@ export function runCheck(
               storeCheckOutput(evidence, spec.name, "stderr", stderrResult),
             ])
           : [];
+        capture.end(executionId, status === "pass" ? 0 : (exit_code || 1));
         resolve({
           name: spec.name,
           command: spec.command,
+          ...(spec.claims ? { claims: { ...spec.claims } } : {}),
           status,
           exit_code,
           duration_ms: Date.now() - started,
           stdout_tail: stdoutResult.tail,
           stderr_tail: stderrResult.tail,
+          ...(capture.executions[0] ? { execution: capture.executions[0] } : {}),
           ...(files[0] ? { stdout_path: files[0].path, stdout_sha256: files[0].sha256 } : {}),
           ...(files[1] ? { stderr_path: files[1].path, stderr_sha256: files[1].sha256 } : {}),
         });
@@ -213,6 +221,15 @@ export function renderChecks(results: CheckResult[]): string {
   for (const r of results) {
     lines.push(`| \`${r.name}\` | ${r.status.toUpperCase()} | ${r.exit_code ?? "-"} | ${(r.duration_ms / 1000).toFixed(1)}s |`);
   }
+  const bound = results.filter((check) => Object.keys(check.claims ?? {}).length);
+  if (bound.length) {
+    lines.push("", "Predeclared claim bindings (only these criteria may become verified; every linked check must pass):");
+    for (const check of bound) {
+      for (const [id, criterion] of Object.entries(check.claims!)) lines.push(`- ${JSON.stringify(id)}: ${JSON.stringify(criterion)} — check ${JSON.stringify(check.name)}`);
+    }
+  } else {
+    lines.push("", "No predeclared claim bindings. QA observations remain gaps; shell success alone cannot verify a behavior.");
+  }
   if (results.some((result) => result.stdout_path || result.stderr_path)) {
     lines.push("", "Evidence files:");
     for (const result of results) {
@@ -233,7 +250,8 @@ async function storeCheckOutput(
   stream: "stdout" | "stderr",
   captured: CapturedOutput,
 ): Promise<{ path: string; sha256: string }> {
-  const directory = path.join(output.directory, "checks");
+  const category = output.category ?? "checks";
+  const directory = path.join(output.directory, category);
   await mkdir(directory, { recursive: true });
   const basename = output.basename ?? safeName(checkName);
   let filename: string;
@@ -259,7 +277,7 @@ async function storeCheckOutput(
   const absolute = path.join(directory, filename);
   await writeFile(absolute, contents);
   return {
-    path: path.posix.join("checks", filename),
+    path: path.posix.join(category, filename),
     sha256: createHash("sha256").update(contents).digest("hex"),
   };
 }

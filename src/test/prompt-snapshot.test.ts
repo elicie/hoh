@@ -1,3 +1,5 @@
+import { refreshRunReceipt } from "../runtime/run-receipt.js";
+import { loadRun } from "../runtime/state.js";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
@@ -194,6 +196,8 @@ test("mid-loop resume preserves completed-role snapshots and overwrites the reru
     const plannerBefore = (await readJson<RolePromptSnapshot>(paths.promptSnapshot(1, "planner")))!;
     const developerBefore = (await readJson<RolePromptSnapshot>(paths.promptSnapshot(1, "developer")))!;
     await writeJson(paths.promptSnapshot(1, "tester"), { stale: true });
+    // Seal the synthetic fixture explicitly; unreceipted edits must fail resume.
+    await refreshRunReceipt(paths, (await loadRun(paths))!);
     await commitAll(ws, "test: seed stale tester prompt snapshot", RUNTIME_IDENTITY, [paths.rel(paths.promptSnapshot(1, "tester"))]);
 
     const healthyDemo = createDemoMockHarness();
@@ -223,6 +227,8 @@ test("unknown external evaluator metadata in a previous record is not mixed into
     const previousEvidence = (await readJson<Record<string, unknown>>(paths.evidenceJson(1)))!;
     previousEvidence.external_evaluator = { note: sentinel };
     await writeJson(paths.evidenceJson(1), previousEvidence);
+    // This test exercises rendering of a trusted fixture with extra metadata.
+    await refreshRunReceipt(paths, (await loadRun(paths))!);
     await commitAll(ws, "test: attach external evaluator metadata", RUNTIME_IDENTITY, [paths.rel(paths.evidenceJson(1))]);
 
     const nextHarness = createDemoMockHarness();

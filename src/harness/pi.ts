@@ -1,3 +1,4 @@
+import type { PiModelsJson } from "../runtime/providers.js";
 /**
  * pi coding agent adapter (in-process SDK).
  *
@@ -26,6 +27,7 @@ import {
 import type { HarnessResourceManifest, ResourceManifestEntry, Role, RoleResourceManifest } from "../types.js";
 import type { Harness, RoleInvocation, RoleResult } from "./types.js";
 import { emptyUsage, PI_BUILTIN_TOOL_NAMES } from "./types.js";
+import { ExecutionEvidenceCapture } from "../runtime/execution-evidence.js";
 
 type ThinkingLevel = NonNullable<CreateAgentSessionOptions["thinkingLevel"]>;
 
@@ -41,6 +43,7 @@ export interface PiHarnessOptions {
   modelRuntimeOptions?: Parameters<typeof ModelRuntime.create>[0];
   /** Exact role resources resolved and hashed by the runtime before the run starts. */
   resourceManifest?: HarnessResourceManifest;
+  providerModels?: PiModelsJson;
   /** Re-hash one role's resources immediately before and after loading them. */
   verifyResourceManifest?: (role: Role) => Promise<void>;
   /** Runtime-owned transport policy. These overrides take precedence over ambient pi settings. */
@@ -76,10 +79,12 @@ export class PiHarness implements Harness {
   readonly name = "pi";
   readonly version = piPackageVersion();
   readonly resourceManifest?: HarnessResourceManifest;
+  readonly providerModels?: PiModelsJson;
   private runtime?: Promise<ModelRuntime>;
 
   constructor(private readonly opts: PiHarnessOptions = {}) {
     this.resourceManifest = opts.resourceManifest;
+    this.providerModels = opts.providerModels;
   }
 
   private getRuntime(): Promise<ModelRuntime> {
@@ -202,11 +207,18 @@ export class PiHarness implements Harness {
     let compactionCount = 0;
     let compactionTokensBefore = 0;
     let compactionEstimatedTokensAfter: number | undefined;
+    const executionCapture = new ExecutionEvidenceCapture(inv.evidenceDir);
     inv.onTranscript?.(
       `${JSON.stringify({ ts: new Date().toISOString(), type: "hoh_invocation", role: inv.role, loop: inv.loopIndex, cwd: inv.cwd, tools: allowedTools, model: usedModel, transport_policy: this.opts.sessionPolicy })}\n`,
     );
 
     const unsubscribe = session.subscribe((event: any) => {
+      if (event.type === "tool_execution_start" && event.toolName === "bash") {
+        executionCapture.start(`qa:${event.toolCallId}`, String(event.args?.command ?? ""));
+      }
+      if (event.type === "tool_execution_end" && event.toolName === "bash") {
+        executionCapture.end(`qa:${event.toolCallId}`, event.isError ? 1 : 0);
+      }
       if (event.type === "message_update") return;
       inv.onTranscript?.(`${JSON.stringify({ ts: new Date().toISOString(), ...event }, truncate)}\n`);
       if (event.type === "auto_retry_start") retryCount += 1;
@@ -256,6 +268,7 @@ export class PiHarness implements Harness {
       usage,
       turns,
       model: usedModel,
+      executions: executionCapture.executions,
       ...(retryCount > 0 ? { retryCount } : {}),
       ...(compactionCount > 0 ? { compactionCount, compactionTokensBefore, compactionEstimatedTokensAfter } : {}),
     };

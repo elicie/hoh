@@ -17,6 +17,7 @@ import { existsSync } from "node:fs";
 import { mkdir, readFile } from "node:fs/promises";
 import path from "node:path";
 import { parseArgs } from "node:util";
+import { createInterface } from "node:readline/promises";
 import { resolveCliModel } from "@earendil-works/pi-coding-agent";
 import { createHarness, createModelRuntime } from "./harness/factory.js";
 import { initializeClaimState } from "./runtime/claims.js";
@@ -188,7 +189,7 @@ async function showStatus(workspace: string): Promise<number> {
   const ledger = await loadLedger(paths);
   const s = ledgerSummary(ledger);
   const spec = await readFile(paths.spec, "utf8");
-  const catalog = await loadClaimCatalog(paths, spec);
+  const catalog = run.config.claim_catalog === "off" ? null : await loadClaimCatalog(paths, spec);
   const coverage = catalog ? await loadCoverage(paths, catalog) : null;
   const loops = await collectLoops(paths);
   const budget = await loadBudgetLedger(paths);
@@ -363,6 +364,9 @@ async function main(argv: string[]): Promise<number> {
   if (cmd === "logs") return showLogs(workspace, values.follow ?? false);
   if (cmd === "run" && values.detach && process.env[DETACHED_CHILD_ENV] !== "1") {
     if (values.spec) await readFile(values.spec, "utf8");
+    if ((await resolve(values)).effective.human_checkpoint) {
+      throw new Error("human_checkpoint requires an interactive foreground CLI run");
+    }
     await mkdir(workspace, { recursive: true });
     await ensureRepo(workspace);
     const detached = await launchDetachedRun({
@@ -389,6 +393,9 @@ async function main(argv: string[]): Promise<number> {
     try {
       loadEnvFiles(workspace, runLog);
       const r = await resolve(values);
+      if (r.effective.human_checkpoint && (!process.stdin.isTTY || detachedChild)) {
+        throw new Error("human_checkpoint requires an interactive foreground CLI run");
+      }
       const harness = await createHarness(r.effective, r.workspace, { log: runLog });
       lifecycle.signal.throwIfAborted();
       const result = await runHoh({
@@ -399,6 +406,12 @@ async function main(argv: string[]): Promise<number> {
         configSource: r.source,
         log: runLog,
         signal: lifecycle.signal,
+        approvePlan: async ({ loopIndex, document, signal }) => {
+          process.stdout.write(`\nDevelopment plan for loop ${loopIndex}:\n${document}\n`);
+          const input = createInterface({ input: process.stdin, output: process.stdout });
+          try { return (await input.question("Approve this plan? [yes/no] ", { signal })).trim().toLowerCase() === "yes"; }
+          finally { input.close(); }
+        },
       });
       lifecycle.signal.throwIfAborted();
       const s = ledgerSummary(result.ledger);

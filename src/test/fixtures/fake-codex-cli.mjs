@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { readFile, writeFile } from "node:fs/promises";
+import { execFileSync } from "node:child_process";
 
 const args = process.argv.slice(2);
 if (args.length === 1 && args[0] === "--version") {
@@ -26,6 +27,13 @@ if (process.env.FAKE_CODEX_RECORD) {
   await writeFile(process.env.FAKE_CODEX_RECORD, JSON.stringify({ args, prompt, final, outputSchema }));
 }
 if (process.env.FAKE_CODEX_WAIT_MS) await new Promise((resolve) => setTimeout(resolve, Number(process.env.FAKE_CODEX_WAIT_MS)));
+if (process.env.FAKE_CODEX_EXECUTE === "1") {
+  const command = 'mkdir -p "$HOH_EVIDENCE_DIR/qa" && test -s input.txt && cat input.txt > "$HOH_EVIDENCE_DIR/qa/result.log"';
+  process.stdout.write(`${JSON.stringify({ type: "item.started", item: { id: "command-1", type: "command_execution", command } })}\n`);
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  execFileSync("sh", ["-c", command], { cwd: valueAfter("--cd"), env: process.env });
+  process.stdout.write(`${JSON.stringify({ type: "item.completed", item: { id: "command-1", type: "command_execution", command, status: "completed", exit_code: 0 } })}\n`);
+}
 process.stdout.write(`${JSON.stringify({ type: "thread.started", thread_id: "fixture-thread" })}\n`);
 process.stdout.write(`${JSON.stringify({ type: "item.completed", item: { id: "message", type: "agent_message", text: final } })}\n`);
 process.stdout.write(`${JSON.stringify({ type: "turn.completed", usage: { input_tokens: 120, cached_input_tokens: 20, output_tokens: 30, reasoning_output_tokens: 5 } })}\n`);

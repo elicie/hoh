@@ -28,6 +28,8 @@ export interface ProviderModelConfig {
   api?: ProviderApi;
   /** the endpoint accepts reasoning_effort / extended thinking for this model */
   reasoning?: boolean;
+  /** Map pi thinking levels to provider efforts; xhigh/max must be declared explicitly. */
+  thinking_level_map?: Partial<Record<"off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max", string | null>>;
   input?: ("text" | "image")[];
   context_window?: number;
   max_tokens?: number;
@@ -129,6 +131,10 @@ export interface BudgetConfig {
 export interface HohConfig {
   /** paper = fixed harness-model/runtime contract; extended = product-specific overrides */
   protocol: ExecutionProtocol;
+  /** Fixed catalog extension: use an existing catalog, explicitly generate it, or disable it. */
+  claim_catalog?: "off" | "existing" | "generate";
+  /** Optional human approval of each development plan; extended runs only. */
+  human_checkpoint?: boolean;
   harness: HarnessName;
   /** custom endpoints, referenced from `models` as "<provider>/<model id>" */
   providers: Record<string, ProviderConfig>;
@@ -165,6 +171,8 @@ export interface HohConfig {
 export const DEFAULT_CONFIG: HohConfig = {
   // Missing protocol fields deliberately resolve to extended for legacy compatibility.
   protocol: "extended",
+  claim_catalog: undefined,
+  human_checkpoint: undefined,
   harness: "pi",
   providers: {},
   models: {},
@@ -197,6 +205,8 @@ export function mergeConfig(base: HohConfig, patch: ConfigPatch | null | undefin
     // silently treating `null`/`undefined` from raw JSON as an omitted field.
     protocol: (Object.prototype.hasOwnProperty.call(patch, "protocol") ? patch.protocol : base.protocol) as ExecutionProtocol,
     harness: patch.harness ?? base.harness,
+    claim_catalog: patch.claim_catalog ?? base.claim_catalog,
+    human_checkpoint: patch.human_checkpoint ?? base.human_checkpoint,
     providers: structuredClone({ ...base.providers, ...stripUndefined(patch.providers ?? {}) }) as Record<string, ProviderConfig>,
     models: { ...base.models, ...stripUndefined(patch.models ?? {}) },
     loops: patch.loops ?? base.loops,
@@ -279,6 +289,9 @@ function mergePiConfig(base: PiConfig, patch: Partial<PiConfig> | null | undefin
 
 export function validateConfig(c: HohConfig): string[] {
   const errors: string[] = [];
+  if (c.claim_catalog !== undefined && !["off", "existing", "generate"].includes(c.claim_catalog)) errors.push('claim_catalog must be off, existing, or generate');
+  if (c.human_checkpoint !== undefined && typeof c.human_checkpoint !== "boolean") errors.push("human_checkpoint must be a boolean");
+  if (c.human_checkpoint && c.protocol !== "extended") errors.push("human_checkpoint is available only in extended runs");
   if (c.protocol !== "paper" && c.protocol !== "extended") {
     errors.push(`protocol must be "paper" or "extended", got ${JSON.stringify(c.protocol)}`);
   }
@@ -360,12 +373,25 @@ export function validateConfig(c: HohConfig): string[] {
   }
   if (c.worktree_setup !== undefined && (typeof c.worktree_setup !== "string" || !c.worktree_setup.trim())) errors.push("worktree_setup must be a non-empty command string");
   if (!Array.isArray(c.checks)) errors.push("checks must be an array");
-  else
+  else {
+    const criteria = new Map<string, string>();
     c.checks.forEach((chk, i) => {
       if (!chk || typeof chk.name !== "string" || !chk.name.trim()) errors.push(`checks[${i}].name is required`);
       if (!chk || typeof chk.command !== "string" || !chk.command.trim()) errors.push(`checks[${i}].command is required`);
       if (chk?.timeout_min !== undefined && !(chk.timeout_min > 0)) errors.push(`checks[${i}].timeout_min must be > 0`);
+      if (chk?.claims !== undefined) {
+        if (!chk.claims || typeof chk.claims !== "object" || Array.isArray(chk.claims)) errors.push(`checks[${i}].claims must map claim IDs to non-empty criteria`);
+        else for (const [id, criterion] of Object.entries(chk.claims)) {
+          if (!/^[a-z0-9]+(?:_[a-z0-9]+)*$/.test(id) || typeof criterion !== "string" || !criterion.trim()) {
+            errors.push(`checks[${i}].claims must map snake_case claim IDs to non-empty criteria`);
+            continue;
+          }
+          if (criteria.has(id) && criteria.get(id) !== criterion.trim()) errors.push(`checks[${i}].claims.${id} conflicts with another check's criterion`);
+          criteria.set(id, criterion.trim());
+        }
+      }
     });
+  }
   if (!(c.timeouts.role_min > 0)) errors.push("timeouts.role_min must be > 0");
   if (!(c.timeouts.check_min > 0)) errors.push("timeouts.check_min must be > 0");
   if (!Number.isFinite(c.timeouts.provider_ms) || c.timeouts.provider_ms <= 0) errors.push("timeouts.provider_ms must be > 0");

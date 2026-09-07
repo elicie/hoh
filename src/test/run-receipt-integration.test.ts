@@ -5,6 +5,7 @@ import path from "node:path";
 import { promisify } from "node:util";
 import test from "node:test";
 import { createDemoMockHarness, MockHarness } from "../harness/mock.js";
+import { git } from "../runtime/git.js";
 import { runHoh } from "../runtime/loop.js";
 import { verifyCurrentRunReceipt } from "../runtime/run-receipt.js";
 import { readJson, RunPaths } from "../runtime/state.js";
@@ -196,3 +197,46 @@ test("a claim-drafting initialization failure leaves a verifiable base-record ch
     await cleanup();
   }
 });
+
+
+for (const mutation of ["ledger", "committed QA", "missing receipt"] as const) {
+  test(`resume rejects ${mutation} tampering without re-sealing or invoking roles`, async () => {
+    const { ws, spec, cleanup } = await makeWorkspace();
+    try {
+      const paths = new RunPaths(ws);
+      await runHoh({ workspace: ws, specPath: spec, harness: createDemoMockHarness(), config: {
+        harness: "mock", loops: 1, claim_catalog: "off",
+        checks: [{ name: "must_pass", command: "exit 1", claims: { required_check: "The mandatory check succeeds." } }],
+      } });
+      const receipt = await readFile(paths.receipt, "utf8");
+      const config = await readFile(paths.config, "utf8");
+      const run = await readFile(paths.runJson, "utf8");
+      if (mutation === "ledger") {
+        await writeFile(paths.ledger, JSON.stringify({ schema_version: 1, issues: {} }));
+      } else if (mutation === "committed QA") {
+        const evidence = JSON.parse(await readFile(paths.evidenceJson(1), "utf8"));
+        assert.equal(evidence.qa_status, "fail");
+        assert.equal(evidence.checks[0].status, "fail");
+        evidence.qa_status = "pass";
+        evidence.summary = "FORGED PASSED VERDICT";
+        evidence.gap_records = [];
+        await writeFile(paths.evidenceJson(1), JSON.stringify(evidence));
+        await git(["add", paths.rel(paths.evidenceJson(1))], ws);
+        await git(["-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-m", "alter QA"], ws);
+      } else {
+        await rm(paths.receipt);
+      }
+      const head = (await git(["rev-parse", "HEAD"], ws)).stdout;
+      let calls = 0;
+      const harness = new MockHarness({ planner: () => { calls++; throw new Error("must not invoke"); },
+        developer: () => { calls++; throw new Error("must not invoke"); }, tester: () => { calls++; throw new Error("must not invoke"); } });
+      await assert.rejects(runHoh({ workspace: ws, harness }), /run receipt verification failed/);
+      assert.equal(calls, 0);
+      assert.equal((await verifyCurrentRunReceipt(ws)).ok, false);
+      assert.equal(await readFile(paths.config, "utf8"), config);
+      assert.equal(await readFile(paths.runJson, "utf8"), run);
+      assert.equal((await git(["rev-parse", "HEAD"], ws)).stdout, head);
+      if (mutation !== "missing receipt") assert.equal(await readFile(paths.receipt, "utf8"), receipt);
+    } finally { await cleanup(); }
+  });
+}

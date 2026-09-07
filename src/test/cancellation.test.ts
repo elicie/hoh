@@ -9,6 +9,7 @@ import { emptyUsage } from "../harness/types.js";
 import { runCheck } from "../runtime/checks.js";
 import { ensureClaimState } from "../runtime/claims.js";
 import { git } from "../runtime/git.js";
+import { verifyCurrentRunReceipt } from "../runtime/run-receipt.js";
 import { runHoh } from "../runtime/loop.js";
 import { readJson, RunPaths } from "../runtime/state.js";
 import type { EvidenceBundle } from "../types.js";
@@ -130,6 +131,7 @@ test("cancellation: claim drafting rechecks an ignored signal before persisting 
     await rm(paths.claims, { force: true });
     await assert.rejects(
       ensureClaimState({
+        mode: "generate",
         workspace: ws,
         specPath: spec,
         spec: await readFile(spec, "utf8"),
@@ -184,11 +186,15 @@ test("cancellation: stopping Tester removes the QA worktree without recording a 
     assert.doesNotMatch(latest.stdout, /runtime error/);
     const history = await git(["log", "--format=%s"], ws);
     assert.doesNotMatch(history.stdout, /checkpoint failed run receipt/);
-    assert.equal(await readFile(paths.receipt, "utf8"), receiptBeforeAbort, "cancellation must not rewrite the last stable receipt");
+    assert.notEqual(await readFile(paths.receipt, "utf8"), receiptBeforeAbort);
+    assert.equal((await verifyCurrentRunReceipt(ws)).ok, true, "cancellation must leave a verifiable checkpoint");
     assert.ok(logs.some((message) => /CANCELLED operator requested stop/.test(message)));
     assert.equal(process.env.HOH_CANDIDATE_DIR, undefined);
     assert.equal(process.env.HOH_EVIDENCE_DIR, undefined);
     assert.equal(await readFile(paths.developerJson(1), "utf8").then(Boolean), true, "the frozen Developer candidate remains resumable");
+    const resumed = await runHoh({ workspace: ws, harness: demo });
+    assert.equal(resumed.results.length, 1);
+    assert.equal((await verifyCurrentRunReceipt(ws)).ok, true);
   } finally {
     await cleanup();
   }

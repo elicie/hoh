@@ -73,6 +73,9 @@ export async function buildProtocolReceipt(
   options: { legacyDefault: boolean; origin: ProtocolReceipt["origin"]; includeResourceContracts?: boolean },
 ): Promise<ProtocolReceipt> {
   const harnessVersion = harness.version?.trim() || "unversioned";
+  if (config.protocol === "paper" && harness.modelReporting === "unavailable") {
+    throw new Error(`${harness.name} cannot report its actual execution model; use extended until the adapter can verify model identity`);
+  }
   if (config.protocol === "paper" && (harnessVersion === "unversioned" || harnessVersion === "unknown")) {
     throw new Error(`paper protocol requires a versioned harness adapter; ${harness.name} reported ${harnessVersion}`);
   }
@@ -119,7 +122,7 @@ export async function buildProtocolReceipt(
   const modelEntries = await Promise.all(
     ROLES.map(async (role) => {
       const pattern = modelForRole(config, role);
-      const resolved = harness.resolveModel ? await harness.resolveModel(pattern) : (pattern ?? null);
+      const resolved = harness.modelReporting === "unavailable" ? null : harness.resolveModel ? await harness.resolveModel(pattern) : (pattern ?? null);
       return [role, resolved] as const;
     }),
   );

@@ -87,7 +87,7 @@ export async function renderRunReadme(
   const budget = await loadBudgetLedger(paths);
   const s = ledgerSummary(ledger);
   const spec = await readFile(paths.spec, "utf8");
-  const catalog = await loadClaimCatalog(paths, spec);
+  const catalog = run.config.claim_catalog === "off" ? null : await loadClaimCatalog(paths, spec);
   const coverage = catalog ? await loadCoverage(paths, catalog) : null;
   const lines: string[] = [];
   lines.push("# HoH Development Record", "");

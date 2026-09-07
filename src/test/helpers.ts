@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import type { CheckSpec } from "../types.js";
 
 export const DEMO_SPEC = `# Demo product
 
@@ -17,6 +18,12 @@ export const DEMO_CLAIMS = [
   { id: "main_entry", criterion: "main.txt names the entry scene.", requires: ["check"] },
   { id: "player_control", criterion: "player_control.txt describes left/right input handling.", requires: ["check"] },
   { id: "result_state", criterion: "result_state.txt describes the visible completion screen.", requires: ["check"] },
+];
+
+export const DEMO_CHECKS: CheckSpec[] = [
+  { name: "main", command: "grep -q 'entry scene: Main' main.txt", claims: { main_entry: DEMO_CLAIMS[0].criterion } },
+  { name: "control", command: "grep -q 'left/right input moves' player_control.txt", claims: { player_control: DEMO_CLAIMS[1].criterion } },
+  { name: "result", command: "grep -q 'completing the objective shows a result screen' result_state.txt", claims: { result_state: DEMO_CLAIMS[2].criterion } },
 ];
 
 export async function makeWorkspace(): Promise<{ ws: string; spec: string; cleanup: () => Promise<void> }> {

@@ -158,3 +158,22 @@ test("ledger: blockers and two-loop gaps are mandatory with stable ordering", ()
   );
   assert.match(developmentDocument, /MANDATORY.*`a_blocker`/);
 });
+
+
+test("ledger: prototype property IDs survive persistence and all issue transitions", () => {
+  const ids = ["constructor", "__proto__", "toString", "hasOwnProperty"];
+  const constructorBefore = Object.getOwnPropertyDescriptors(Object);
+  const prototypeBefore = Object.getOwnPropertyDescriptors(Object.prototype);
+  let ledger = emptyLedger();
+  assert.deepEqual(applyEvidence(ledger, { loop_index: 1, verified_records: ids.map(ok), gap_records: [] }).closed, []);
+  assert.equal(Object.keys(ledger.issues).length, 0);
+  assert.deepEqual(applyEvidence(ledger, { loop_index: 2, verified_records: [], gap_records: ids.map((id) => gap(id)) }).opened, ids);
+  ledger = JSON.parse(JSON.stringify(ledger));
+  assert.deepEqual(applyEvidence(ledger, { loop_index: 3, verified_records: ids.map(ok), gap_records: [] }).closed, ids);
+  ledger = JSON.parse(JSON.stringify(ledger));
+  assert.deepEqual(applyEvidence(ledger, { loop_index: 4, verified_records: [], gap_records: ids.map((id) => gap(id)) }).reopened, ids);
+  assert.equal(Object.keys(ledger.issues).length, ids.length);
+  for (const id of ids) assert.deepEqual(ledger.issues[id].history.map((entry) => entry.status), ["open", "closed", "regressed"]);
+  assert.deepEqual(Object.getOwnPropertyDescriptors(Object), constructorBefore);
+  assert.deepEqual(Object.getOwnPropertyDescriptors(Object.prototype), prototypeBefore);
+});

@@ -11,7 +11,7 @@ import { verifyCurrentRunReceipt } from "../runtime/run-receipt.js";
 import { ExecutionRecordSchema } from "../runtime/schemas.js";
 import { readJson, RunPaths } from "../runtime/state.js";
 import type { CheckResult, ClaimCatalog, DeveloperRecord, EvidenceBundle, EvidenceSubmission, Ledger } from "../types.js";
-import { makeWorkspace } from "./helpers.js";
+import { DEMO_CHECKS, makeWorkspace } from "./helpers.js";
 
 async function exists(p: string): Promise<boolean> {
   try {
@@ -218,7 +218,7 @@ test("e2e: demo mock harness completes two loops and closes the gap", async () =
       workspace: ws,
       specPath: spec,
       harness,
-      config: { harness: "mock", loops: 2, checks: [{ name: "list", command: "ls -1 | wc -l" }] },
+      config: { harness: "mock", loops: 2, checks: [{ name: "list", command: "ls -1 | wc -l" }, ...DEMO_CHECKS] },
       log: (m) => logs.push(m),
     });
     const paths = new RunPaths(ws);
@@ -226,7 +226,7 @@ test("e2e: demo mock harness completes two loops and closes the gap", async () =
     assert.equal(result.results.length, 2);
     const e1 = result.results[0].evidence;
     const e2 = result.results[1].evidence;
-    assert.equal(e1.qa_status, "partial");
+    assert.equal(e1.qa_status, "fail");
     assert.deepEqual(
       e1.gap_records.map((g) => g.claim_id),
       ["result_state"],
@@ -270,12 +270,12 @@ test("e2e: demo mock harness completes two loops and closes the gap", async () =
     }
     const doc2 = await readFile(paths.developmentDocument(2), "utf8");
     assert.match(doc2, /Repair the missing result state/);
-    assert.match(doc2, /`result_state` \[major, open, 1 loop\(s\)\]/);
+    assert.match(doc2, /`result_state` \[blocker, open, 1 loop\(s\)\]/);
 
     // Prompts carried the evidence and ledger forward.
     const plannerPrompt2 = harness.calls.find((c) => c.role === "planner" && c.loopIndex === 2)!.prompt;
     assert.match(plannerPrompt2, /Candidate assessed: `loop-01-/);
-    assert.match(plannerPrompt2, /`result_state` \[major\]/);
+    assert.match(plannerPrompt2, /`result_state` \[blocker\]/);
     const testerPrompt1 = harness.calls.find((c) => c.role === "tester" && c.loopIndex === 1)!.prompt;
     assert.match(testerPrompt1, /Candidate id: `loop-01-/);
     assert.match(testerPrompt1, /`list` \| PASS/);
@@ -285,7 +285,7 @@ test("e2e: demo mock harness completes two loops and closes the gap", async () =
     const subjects = log.map((l) => l.subject);
     assert.ok(subjects.some((s) => s.startsWith("docs(loop-01): ")));
     assert.ok(subjects.some((s) => s.startsWith("feat(loop-01): ")));
-    assert.ok(subjects.some((s) => s.startsWith("test(loop-01): QA partial for loop-01-")));
+    assert.ok(subjects.some((s) => s.startsWith("test(loop-01): QA fail for loop-01-")));
     assert.ok(subjects.some((s) => s.startsWith("test(loop-02): QA pass for loop-02-")));
     assert.ok(subjects.some((s) => s.startsWith("chore(hoh): initialize run ")));
     assert.equal(log.find((l) => l.subject.startsWith("feat(loop-01)"))!.author, "hoh-developer-bot");
@@ -788,8 +788,8 @@ test("runtime-owned record changes present before the developer starts are commi
     const { writeFile } = await import("node:fs/promises");
     const harness = createDemoMockHarness();
     await runHoh({ workspace: ws, specPath: spec, harness, config: { harness: "mock", loops: 1 } });
-    // Simulate start-up regeneration of a runtime-owned file (e.g. the provider models file) before the next invocation.
-    await writeFile(path.join(ws, ".hoh", "pi-models.json"), JSON.stringify({ providers: { p: { models: [] } } }));
+    // Prepared adapter records are installed only after the previous receipt is verified.
+    Object.defineProperty(harness, "providerModels", { value: { providers: { p: { models: [] } } } });
     const result = await runHoh({ workspace: ws, harness, config: { loops: 2 } });
     const dev = result.results[0].developer;
     assert.deepEqual(dev.violations, []);

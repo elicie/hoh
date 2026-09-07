@@ -5,10 +5,12 @@ import path from "node:path";
 import { test } from "node:test";
 import { createDemoMockHarness, MockHarness } from "../harness/mock.js";
 import { bindEvidenceFiles } from "../runtime/evidence-files.js";
+import { runCheck } from "../runtime/checks.js";
+import { ExecutionEvidenceCapture } from "../runtime/execution-evidence.js";
 import { git } from "../runtime/git.js";
 import { runHoh } from "../runtime/loop.js";
 import { readJson, RunPaths } from "../runtime/state.js";
-import type { EvidenceBundle } from "../types.js";
+import type { CheckResult, EvidenceBundle } from "../types.js";
 import { makeWorkspace } from "./helpers.js";
 
 function expectedTail(full: string): string {
@@ -135,7 +137,8 @@ test("binding never upgrades failed QA and rebinds only usable evidence referenc
     );
 
     assert.equal(rebound.qa_status, "fail");
-    assert.deepEqual(rebound.verified_records.map((record) => record.claim_id), ["valid_run"]);
+    assert.deepEqual(rebound.verified_records, []);
+    assert.ok(rebound.gap_records.some((record) => record.claim_id === "valid_run"));
     const unsafeGap = rebound.gap_records.find((record) => record.claim_id === "unsafe_run");
     assert.equal(unsafeGap?.severity, "blocker");
     assert.ok(rebound.runtime_notes.some((note) => note.includes("outside HOH_EVIDENCE_DIR")));
@@ -145,6 +148,88 @@ test("binding never upgrades failed QA and rebinds only usable evidence referenc
   } finally {
     await cleanup();
   }
+});
+
+test("bound checks require successful execution and unchanged output files", async () => {
+  const { ws, cleanup } = await makeWorkspace();
+  try {
+    const directory = new RunPaths(ws).evidenceDir(1);
+    await mkdir(directory, { recursive: true });
+    const check = await runCheck({ name: "real", command: "printf observed", claims: { entry: "observed" } }, ws, 10_000, {}, { directory, basename: "real" });
+    const failed = await runCheck({ name: "failed", command: "printf failure; exit 1", claims: { entry: "observed" } }, ws, 10_000, {}, { directory, basename: "failed" });
+    await writeFile(path.join(directory, "unrelated.log"), "claimed");
+    const candidate = (file: string, checks: CheckResult[] = []): EvidenceBundle => evidenceBundle({
+      checks,
+      verified_records: [{ claim_id: "entry", claim: "observed", status: "verified", execution_records: [{ type: "check", path: file, observation: "observed" }] }],
+    });
+    const executions = [check.execution!, failed.execution!];
+    const verified = await bindEvidenceFiles(candidate(check.stdout_path!, [check]), directory, undefined, executions);
+    assert.equal(verified.qa_status, "pass");
+    assert.equal(verified.verified_records[0].execution_records[0].execution_id, check.execution!.id);
+    for (const file of [failed.stdout_path!, "unrelated.log"]) {
+      const rejected = await bindEvidenceFiles(candidate(file, [failed]), directory, undefined, executions);
+      assert.equal(rejected.qa_status, "fail");
+      assert.equal(rejected.verified_records.length, 0);
+    }
+    await writeFile(path.join(directory, check.stdout_path!), "changed after execution");
+    assert.equal((await bindEvidenceFiles(candidate(check.stdout_path!, [check]), directory, undefined, executions)).qa_status, "fail");
+  } finally { await cleanup(); }
+});
+
+test("evidence root links never expose their target to retention cleanup", async () => {
+  const { ws, cleanup } = await makeWorkspace();
+  try {
+    const target = path.join(ws, "target");
+    const directory = path.join(ws, "evidence");
+    await mkdir(target);
+    const contents = "x".repeat(2 * 1024 * 1024 + 1);
+    await writeFile(path.join(target, "outside.log"), contents);
+    await symlink(target, directory);
+    await bindEvidenceFiles(evidenceBundle({}), directory);
+    assert.equal(await readFile(path.join(target, "outside.log"), "utf8"), contents);
+    assert.equal((await lstat(directory)).isDirectory(), true);
+  } finally { await cleanup(); }
+});
+
+test("a claim downgraded during file binding wins over another verified record with the same ID", async () => {
+  const { ws, cleanup } = await makeWorkspace();
+  try {
+    const directory = new RunPaths(ws).evidenceDir(1);
+    await mkdir(directory, { recursive: true });
+    const check = await runCheck({ name: "scene", command: "printf checked", claims: { scene: "The registered scene check passes." } }, ws, 10_000, {}, { directory });
+    const capture = new ExecutionEvidenceCapture(directory);
+    capture.start("qa:screenshot", "capture fixture");
+    await writeFile(path.join(directory, "present.png"), "fixture image bytes");
+    capture.end("qa:screenshot", 0);
+    const bundle = evidenceBundle({ checks: [check], verified_records: ["present.png", "missing.png"].map((file) => ({
+      claim_id: "scene", claim: "The registered scene check passes.", status: "verified",
+      execution_records: [{ type: "screenshot", path: file, observation: "image captured" }],
+    })) });
+    const result = await bindEvidenceFiles(bundle, directory, { schema_version: 1, spec_sha256: "a".repeat(64),
+      claims: [{ id: "scene", criterion: "The registered scene check passes.", requires: ["screenshot"] }] }, capture.executions);
+    assert.equal(result.qa_status, "fail");
+    assert.deepEqual(result.verified_records, []);
+    assert.ok(result.gap_records.some((record) => record.claim_id === "scene"));
+  } finally { await cleanup(); }
+});
+
+test("capture and retention prioritize check evidence at the loop byte limit", async () => {
+  const { ws, cleanup } = await makeWorkspace();
+  try {
+    const directory = path.join(ws, "evidence");
+    const capture = new ExecutionEvidenceCapture(directory);
+    capture.start("real-process", "fixture evidence producer");
+    await mkdir(path.join(directory, "aaa"), { recursive: true });
+    await mkdir(path.join(directory, "checks"));
+    for (let i = 0; i < 15; i++) await writeFile(path.join(directory, "aaa", `${i}.log`), "x".repeat(2 * 1024 * 1024));
+    await writeFile(path.join(directory, "checks", "result.log"), "checked");
+    capture.end("real-process", 0);
+    const bundle = evidenceBundle({ verified_records: [{ claim_id: "entry", claim: "observed", status: "verified", execution_records: [{ type: "check", path: "checks/result.log", observation: "observed" }] }] });
+    const result = await bindEvidenceFiles(bundle, directory, undefined, capture.executions);
+    assert.equal(result.qa_status, "fail", "retained execution provenance alone does not verify an unbound claim");
+    assert.ok(result.gap_records[0].execution_records[0].sha256);
+    assert.ok(capture.executions[0].files.some((file) => file.path === "checks/result.log"));
+  } finally { await cleanup(); }
 });
 
 test("tester evidence files are force-added while out-of-scope writes are blocked", async () => {
@@ -163,8 +248,7 @@ test("tester evidence files are force-added while out-of-scope writes are blocke
         assert.equal(process.env.HOH_EVIDENCE_DIR, evidenceDir);
         assert.equal((await stat(evidenceDir)).isDirectory(), true);
 
-        const validPath = path.join(evidenceDir, "tester", "observed.log");
-        await api.write(validPath, fileContent);
+        await api.run('mkdir -p "$HOH_EVIDENCE_DIR/tester" && printf "tester-collected evidence\\n" > "$HOH_EVIDENCE_DIR/tester/observed.log"');
         await api.write(outsidePath, "outside evidence root\n");
         api.submit("submit_evidence", {
           qa_status: "pass",
@@ -197,7 +281,7 @@ test("tester evidence files are force-added while out-of-scope writes are blocke
 
     const evidence = (await readJson<EvidenceBundle>(paths.evidenceJson(1)))!;
     assert.equal(evidence.qa_status, "fail");
-    const claim = evidence.verified_records.find((record) => record.claim_id === "free_evidence_file_claim");
+    const claim = evidence.gap_records.find((record) => record.claim_id === "free_evidence_file_claim");
     assert.ok(claim);
     const records = claim.execution_records;
     const valid = records.find((record) => record.path === "tester/observed.log");
@@ -335,6 +419,7 @@ test("evidence symlinks and files over 2 MiB are removed without hashes", async 
         await api.write(targetPath, "safe target\n");
         await symlink("target.txt", linkedPath);
         await api.write(oversizedPath, "x".repeat(2 * 1024 * 1024 + 1));
+        const check = await api.run('test -f "$HOH_EVIDENCE_DIR/target.txt"');
         api.submit("submit_evidence", {
           qa_status: "pass",
           summary: "Unsafe evidence entries were submitted alongside a runtime observation.",
@@ -343,7 +428,7 @@ test("evidence symlinks and files over 2 MiB are removed without hashes", async 
               claim_id: "bounded_evidence_files",
               claim: "Only bounded regular evidence files are retained.",
               execution_records: [
-                { type: "run", observation: "The runtime behavior was observed." },
+                { type: "run", path: check.stdout_path, observation: "The retained target file exists." },
                 { type: "screenshot", path: "linked.png", observation: "A symlink was submitted as a screenshot." },
                 { type: "log", path: "too-big.log", observation: "An oversized log was submitted." },
               ],
@@ -357,14 +442,14 @@ test("evidence symlinks and files over 2 MiB are removed without hashes", async 
 
     const result = await runHoh({ workspace: ws, specPath: spec, harness, config: { harness: "mock", loops: 1 } });
     const evidence = result.results[0].evidence;
-    assert.equal(evidence.qa_status, "pass");
+    assert.equal(evidence.qa_status, "fail", "file retention does not independently verify a behavior");
     assert.equal(await exists(linkedPath), false);
     assert.equal(await exists(oversizedPath), false);
     assert.equal(await headHasFile(ws, linkedPath), false);
     assert.equal(await headHasFile(ws, oversizedPath), false);
     assert.equal((await git(["diff", "--cached", "--quiet"], ws, { allowFail: true })).code, 0);
     assert.equal(await readFile(targetPath, "utf8"), "safe target\n");
-    const claim = evidence.verified_records.find((record) => record.claim_id === "bounded_evidence_files");
+    const claim = evidence.gap_records.find((record) => record.claim_id === "bounded_evidence_files");
     assert.ok(claim);
     assert.equal(claim.execution_records.find((record) => record.path === "linked.png")?.sha256, undefined);
     assert.equal(claim.execution_records.find((record) => record.path === "too-big.log")?.sha256, undefined);
@@ -422,8 +507,8 @@ test("tester edits to runtime records and frozen check logs are restored and blo
     assert.equal(await readHeadFile(ws, checkLog), originalCheckLog);
     assert.equal((await git(["diff", "--cached", "--quiet"], ws, { allowFail: true })).code, 0);
     assert.equal(evidence.qa_status, "fail");
-    assert.ok(evidence.verified_records.some((record) => record.claim_id === "free_runtime_claim"));
-    assert.ok(!evidence.gap_records.some((record) => record.claim_id === "free_runtime_claim"));
+    assert.ok(!evidence.verified_records.some((record) => record.claim_id === "free_runtime_claim"));
+    assert.ok(evidence.gap_records.some((record) => record.claim_id === "free_runtime_claim"));
     const check = evidence.checks.find((record) => record.name === "tamper-check");
     assert.equal(check?.status, "pass");
     assert.equal(check?.stdout_tail, originalCheckLog);

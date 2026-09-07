@@ -188,6 +188,7 @@ function checksDisclosure(sourcePath: string | null, checks: CheckResult[] | nul
 }
 
 function coverageDisclosure(claimCatalog: ClaimCatalog, coverage: CoverageState): string {
+  if (claimCatalog.claims.length === 0) return "_Fixed claim catalog is disabled or absent. Discover independent claims from the specification and development document._";
   return renderContextDisclosure({
     sourcePath: [".hoh/claims.json", ".hoh/coverage.json"],
     content: renderCoverageTable(claimCatalog, coverage),

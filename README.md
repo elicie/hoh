@@ -17,10 +17,310 @@ for t = 1..T:
 
 The default inner harness is the [pi coding agent](https://github.com/earendil-works/pi)
 through its SDK (one of the harnesses evaluated in the paper). A Codex CLI
-adapter is also available for controlled comparison runs. The runtime in this
+adapter is also available for `extended` runs. The runtime in this
 repository is the part the paper calls "the deterministic Runtime": it freezes
 each role's inputs, enforces permissions, binds evidence to the exact candidate,
 and records every loop in git.
+
+## What you can do with it
+
+The runtime turns a written specification into a repeating, audited development
+loop. That makes it useful for several different jobs, not only for building a
+product end to end.
+
+**Improve an existing artifact against a written contract.** Point a workspace at
+code you already have, write the PRD you wish it satisfied, and let the loop
+close the difference. This is the demonstrated path: a 1000-line single-file
+browser game went from four to five enemy types, gained score medals, a bomb cap,
+an ALL CLEAR ending, a formation bonus, and per-stage music over three loops,
+with its four smoke checks green throughout and all four ledger issues closed.
+The starting artifact is identified as candidate `loop-00-<hash>` and warm-started
+from, so nothing is rebuilt from scratch.
+
+**Build from an empty workspace.** With no starting artifact, loop 1 creates the
+project. The difference from a single long agent session is that every loop ends
+in a frozen candidate, deterministic checks, and an independent QA pass whose
+verdict is bound to that exact tree.
+
+**Find out what a codebase actually proves.** Write the acceptance criteria, run
+`init-claims` to fix them as a catalog, then run a single loop. Its evidence
+bundle and coverage map separate criteria backed by execution evidence from
+criteria that are merely claimed, and source-only verification is downgraded
+automatically, so "the function exists" never counts as "the behavior works".
+This is not a read-only audit: a loop always includes a Developer pass, which
+will change the artifact under the plan. Run it on a branch.
+
+**Compare models on the same task.** Swap `models.planner` / `developer` /
+`tester` and rerun the same PRD in a fresh workspace. Because the budget ledger
+records tokens, cost, and elapsed time per role, and the ledger records issues
+opened and closed, you can track cost per closed issue. A different Tester model
+can provide another perspective; independent performance evaluation still needs
+an external benchmark or human rubric.
+
+**Use another harness.** The common role interface drives the pi SDK and the
+Codex CLI. Codex currently supports `extended` runs: its CLI does not report the
+actual execution model, so it cannot satisfy the strict `paper` model check or
+participate in the sealed paper experiment. New adapters implement `Harness`.
+
+**Run the paper's ablations.** The experiment harness seals a plan over all five
+conditions — `hoh`, `vanilla`, `no-plan-update`, `no-evidence`, `no-warm-start` —
+executes each in a fresh copy of a hashed A0, archives the exact candidate tree,
+and scores it with a blind evaluator that never sees development prompts. That is
+the apparatus for answering whether the loop, the plan updates, the evidence
+feedback, or the warm start is doing the work.
+
+**Produce a run somebody else can check.** Under `protocol: "paper"`, the harness
+version, one resolved model identity, the role prompt and tool contracts, the
+runtime policy, and the iteration budget are fixed in a receipt at run start.
+`hoh verify` re-checks the whole run state from local files and Git objects
+alone, with no config, credentials, or network. The git history, evidence files,
+and redacted prompt snapshots make the trajectory legible after the fact.
+
+**Keep a specification satisfied over time.** Because a gap on a previously
+closed issue is recorded as a regression and escalates into mandatory work, a
+periodically resumed run behaves like a maintenance agent guarding a contract
+rather than a one-shot generator.
+
+### When not to use it
+
+A loop costs roughly 250k input tokens and 20 minutes of role time on a
+1000-line artifact, so a single-file fix is cheaper to do directly. The design
+also assumes the specification's acceptance criteria can be checked by executing
+something: without deterministic checks and observable behavior, QA degrades to
+reading source, which the runtime deliberately refuses to accept as
+verification. Roles run with your own process permissions and shell access, so
+untrusted specifications or tooling need isolation. Steering happens through the
+PRD, config, and ledger. An optional `extended` checkpoint lets you approve each
+development plan before the Developer starts.
+
+## Quickstart
+
+Requirements: Node.js 22.19 or newer and Git. A model is needed only for a real
+run; the first command below needs none.
+
+```bash
+npm install
+npm run build
+```
+
+Every command is `node dist/cli.js <command>`. `npm link` also puts the same
+entry point on your PATH as `hoh`.
+
+### 1. Dry run with no model
+
+The `mock` harness replays a scripted Planner, Developer, and Tester, so you can
+see a complete two-loop record before spending a token:
+
+```bash
+node dist/cli.js run    --workspace /tmp/hoh-demo --spec examples/demo-PRD.md --config examples/mock.config.json
+node dist/cli.js status --workspace /tmp/hoh-demo
+```
+
+`status` prints the lifecycle, protocol and run receipts, the issue ledger, PRD
+coverage, and one line per loop:
+
+```
+Run 20260906-cbc90a — protocol PAPER, harness mock, budget 2 loops
+Run receipt: VERIFIED 68a18aa26998708d9547745888228bbef803cc81f73baef18973984bb5717b05
+Ledger: open 0, regressed 0, closed 1, all 1
+Coverage: verified 3, untested 0, gap 0, all 3
+
+Loop  Candidate            QA        Verified/Gaps  Objective
+   1  loop-01-ba29bc99ea4c FAIL      2/1            Bootstrap a launchable artifact …
+   2  loop-02-dc68b032ff02 PASS      3/0            Repair the missing result state …
+```
+
+The full development record is `/tmp/hoh-demo/.hoh/README.md`, and every loop is
+a `docs`/`feat`/`test` commit in that workspace's Git history.
+
+### 2. Real run
+
+```bash
+# 1. credentials: keep them out of the committed config
+echo 'SPBROS_API_KEY=…' > .env          # .env is git-ignored and loaded automatically
+
+# 2. point the config at your endpoint and models, then confirm they resolve
+node dist/cli.js config --workspace ../my-project
+
+# 3. optionally draft and review a fixed PRD claim catalog
+node dist/cli.js init-claims --workspace ../my-project --spec ../my-project/PRD.md
+
+# 4. run the budgeted loops in the background, and watch
+node dist/cli.js run  --workspace ../my-project --spec ../my-project/PRD.md --detach
+node dist/cli.js logs --workspace ../my-project -f
+```
+
+Use a dedicated, backed-up Git branch or workspace with no concurrent human
+edits. HoH creates commits and worktrees, and reverts role writes that cross its
+runtime-record boundaries.
+
+`config` exits non-zero when a model pattern does not resolve or has no
+credentials, so it is a safe pre-flight:
+
+```
+Providers (pi models file: ../my-project/.hoh/pi-models.json):
+  spbros: https://ai-api.spbros.com/v1 [openai-completions] — 23 model(s) (discovered)
+Models per role:
+  planner   spbros/gpt-5.5:high  -> spbros/gpt-5.5 (thinking high)  [auth ok]
+  developer spbros/gpt-5.5:high  -> spbros/gpt-5.5 (thinking high)  [auth ok]
+  tester    spbros/gpt-5.5:high  -> spbros/gpt-5.5 (thinking high)  [auth ok]
+```
+
+`examples/1945/` is a complete worked input kit from a real three-loop run: a
+PRD with a machine-checkable QA contract, four deterministic checks, a
+headless-Chrome playtest driver, and a hash-verified `worktree_setup`.
+
+## CLI reference
+
+| Command | What it does |
+| --- | --- |
+| `run` | Start or resume the loops. Writes every record under `<workspace>/.hoh/` and commits each role boundary |
+| `init-claims` | Ask the Planner model to draft `.hoh/claims.json` from the spec, so you can edit it before loop 1 |
+| `status` | Lifecycle, protocol/run receipts, models, budget, ledger, coverage, and the per-loop table |
+| `verify` | Offline run-receipt verification. Reads only local files and Git objects: no config, `.env`, provider, or harness |
+| `stop` | Ask an active run to stop, then wait up to 20s for the runtime to clean up its worktree and records |
+| `logs` | Print the run log; `-f` follows it |
+| `config` | The effective config, discovered provider models, and per-role model resolution with a credential check |
+
+| Flag | Applies to | Meaning |
+| --- | --- | --- |
+| `--workspace`, `-w` | all | The product workspace. Defaults to the current directory |
+| `--spec`, `-s` | `run`, `init-claims` | Path to the PRD. `run` copies it to `.hoh/spec.md` on the first invocation; omit it when resuming |
+| `--config`, `-c` | `run`, `init-claims`, `config` | Config file for this invocation. Omit it when resuming so the run's own protected `.hoh/config.json` is reused |
+| `--loops`, `-n` | `run` | Iteration budget `T`. Stored for an `extended` run; a `paper` run rejects a changed initial `T` |
+| `--detach` | `run` | Run in a detached process and return immediately. The log path is printed |
+| `--follow`, `-f` | `logs` | Stream new output until interrupted |
+
+Exit codes: `0` on success; `1` for an invalid config, a missing run, a failed
+receipt verification, or a stop that timed out; `130`/`143` when a run was
+cancelled or stopped.
+
+Runtime lifecycle files live in the workspace's Git directory, not in `.hoh/`,
+so they are never committed: `.git/hoh/process.json` and `.git/hoh/run.log`.
+
+## Preparing a project for a run
+
+A run takes a PRD and model configuration. Checks and a fixed claim catalog add
+project-specific verification.
+
+**1. A PRD with player-observable acceptance criteria.** Write criteria a Tester
+can check by executing the artifact, not by reading its source. Include the
+verification tools you provide and how to invoke them. If the product needs a
+debug hook to be observable at all, specify that hook in the PRD as a
+requirement, the way `examples/1945/PRD.md` specifies a read-only `window.__dbg`.
+
+**2. Deterministic checks.** These run on the frozen candidate before QA, and a
+failure becomes a blocker gap. Keep them fast, non-interactive, and free of
+secrets in their output, because their stdout and stderr are committed as
+evidence:
+
+```json
+"worktree_setup": "npm ci --prefix tools --ignore-scripts",
+"checks": [
+  { "name": "syntax", "command": "node ../tools/syntax-check.mjs index.html", "timeout_min": 1 },
+  { "name": "boot", "command": "node ../tools/playtest.mjs --file index.html --seconds 3 --fail-on-errors", "timeout_min": 2,
+    "claims": { "boot_smoke": "The page runs for 3 seconds without reported errors." } }
+]
+```
+
+Checks run from `artifact_dir` inside an isolated worktree that contains only
+committed files. Untracked directories such as `tools/node_modules` are absent,
+so either install them in `worktree_setup` or resolve them from `$HOH_WORKSPACE`.
+Checks and the Tester also receive `HOH_CANDIDATE_DIR` and `HOH_EVIDENCE_DIR`.
+
+`checks[].claims` maps stable claim IDs to the exact criteria a command tests.
+Only registered claims can become `verified`, and every check linked to an ID
+must pass with intact output evidence. The runtime attaches those check records
+and stores the registered criterion, so QA cannot expand it by reusing the ID.
+Unregistered observations remain gaps, including successful QA shell commands.
+Register only criteria the check actually tests and keep acceptance check code
+under operator control: the runtime enforces the binding, not the correctness
+or completeness of an arbitrary checker.
+
+**3. An optional claim catalog.** `.hoh/claims.json` holds one stable claim per acceptance
+criterion with the execution evidence types that claim requires. `init-claims`
+drafts it; review its coverage and `requires` fields before running, because the
+runtime enforces declared requirements but cannot prove the model declared all
+of them. The default `claim_catalog: "existing"` uses the file when present and
+runs the core loop without it when absent. `"off"` disables catalog loading;
+`"generate"` explicitly enables drafting before loop 1 and fails if drafting
+cannot produce a valid catalog. A catalog criterion and its check binding must
+agree. Free observations remain available as gaps in all modes; a catalog is
+not required to register check-bound claims.
+
+Then confirm the whole setup resolves before spending loops:
+
+```bash
+node dist/cli.js config --workspace ../my-project     # models + credentials
+node dist/cli.js run --workspace /tmp/probe --spec ../my-project/PRD.md --config examples/mock.config.json
+```
+
+## Operating a run
+
+**Watch it.** `logs -f` streams the run log; `status` is a point-in-time summary
+that also works while a run is active. Both read committed records, so they are
+safe to call at any time.
+
+**Stop and resume.** `stop` requests a cooperative shutdown: the active role is
+aborted, check process groups are killed, and a cancelled QA attempt removes its
+worktree without recording a verdict. Resuming needs no flags:
+
+```bash
+node dist/cli.js stop --workspace ../my-project
+node dist/cli.js run  --workspace ../my-project        # continues where it stopped
+```
+
+`run` resumes after the last loop whose `evidence.json` is committed at `HEAD`.
+Inside an incomplete loop it reuses a recorded plan and development document, and
+reuses a recorded Developer result only when the current `artifact_dir` hash
+still matches it; checks and the Tester then run again against that same
+candidate tree. A mismatch aborts instead of silently testing a different
+artifact. Omit `--config` on resume so the run's protected copy is used rather
+than a root file a role could have changed.
+
+**Extend the budget.** For an `extended` run, `--loops <n>` raises `T`. For a
+`paper` run the initial loop, token, cost, and elapsed ceilings are part of the
+immutable receipt: start a new run in another workspace instead of raising them.
+
+**Review a plan before development.** Set `human_checkpoint: true` with
+`protocol: "extended"` and run the CLI in an interactive foreground terminal.
+It displays the exact plan and requires `yes` before Developer execution.
+Declining stops the loop; resuming reuses the plan and requests approval again.
+Accepted approvals are bound to the plan bytes and protocol hash in
+`iterations/loop-NN/approval.json`. Review waiting time is excluded from active
+budget time. Library callers supply `approvePlan(checkpoint): Promise<boolean>`
+to `runHoh` and should honor `checkpoint.signal` while waiting. Detached and
+non-interactive CLI runs reject this option before invoking a model.
+
+**Budget exhaustion is not an error.** Reaching a ceiling returns the resumable
+`budget_exhausted` state, preserving the partial loop and creating no QA verdict
+or `error.json`. The ledger charges the usage each completed role returns,
+including pi's same-session retry totals; usage for a call that throws is
+recorded as unavailable rather than estimated as zero. Accounting starts at the
+loop-1 Planner, so the optional loop-0 claim drafting is outside it.
+
+**Judge progress by the ledger, not by QA PASS.** Gaps open issues, verified
+records close them, and a gap on a closed issue is a regression. A blocker, or a
+gap seen in two adjacent loops, becomes mandatory work in the next loop. The
+Fusepoint trajectory has 2 PASS in 96 loops; a run that never reaches PASS can
+still be closing issues every loop.
+
+**Check the record afterwards.** `.hoh/README.md` is the generated development
+record, `.hoh/iterations/loop-NN/tester_report.md` is the human-readable QA
+report, and `verify` re-checks the whole run state offline.
+
+## Troubleshooting
+
+| Symptom | Cause and fix |
+| --- | --- |
+| Checks fail instantly with a missing module or binary | The isolated worktree has only committed files. Install in `worktree_setup`, or have the tool resolve dependencies from `$HOH_WORKSPACE` |
+| `config` reports `NO CREDENTIALS` | The `$ENV_VAR` named by `providers.<name>.api_key` is unset. Put it in `.env` in the workspace or the current directory, or export it |
+| `cannot resume loop N: artifact tree … differs` | The `artifact_dir` contents changed after the recorded candidate. Restore that tree, or start a fresh run |
+| QA fails with a runtime blocker about a mutated candidate | The Tester wrote outside the loop's evidence directory. Its writes are reverted and the verdict fails by design |
+| A run seems stuck | `status` shows the active role and elapsed time. `timeouts.output_idle_ms` bounds provider silence and `timeouts.role_min` bounds the role |
+| `Started detached HoH run` then nothing in `status` | Read `.git/hoh/run.log` directly, or `logs`. A start-up failure is written there before the lifecycle state exists |
+| A run refuses to start because one is active | Only one run per workspace. `stop` it, or use a separate workspace |
+| `verify` fails after you edited a record by hand | `.hoh/` is runtime-owned. Restore it from Git history; the receipt binds every canonical record |
 
 ## What the runtime enforces
 
@@ -91,13 +391,23 @@ of pretending that Codex exposes pi's individual built-in tool names.
   writes cannot forge the runtime's log. Config-referenced provider credentials
   and narrow credential syntax are redacted at that storage boundary.
 - **Structured output or nothing.** Planner and Tester deliver through tools
-  with TypeBox schemas. A missing call is retried once with a runtime notice;
+  with TypeBox schemas; Codex receives a final-JSON output contract instead.
+  A missing deliverable is retried once with a runtime notice;
   a Planner that still returns nothing aborts the loop, a Tester that still
   returns nothing yields a failing evidence bundle (`tester.no_structured_output`).
 - **Evidence normalization** (paper appendix A.4): verified vs gap records,
   a claim in both lists counts as a gap, failed deterministic checks become
   blocker gaps, source/config/manifest-only verification is downgraded, and
   fixed claims must satisfy every evidence type in their `requires` list.
+  Every qualifying record must cite a retained file whose current hash matches
+  a successful configured check or QA shell execution captured by the runtime.
+  Verification additionally requires a predeclared `checks[].claims` binding
+  with intact successful evidence for every linked check. The runtime attaches
+  that evidence and uses the registered criterion as the claim text. Unbound
+  claims are gaps; failed bound checks make their claim IDs blocker gaps.
+  A QA `printf PASS` or a model-supplied receipt cannot establish verification.
+  Check authors remain responsible for the registered criteria and checker
+  quality; execution provenance cannot prove complete requirement coverage.
 - **Fixed PRD coverage.** `.hoh/claims.json` keeps one stable claim per public
   acceptance criterion. `.hoh/coverage.json` records each claim as `verified`,
   `gap`, or `untested`, plus its last verified loop and verification count.
@@ -107,7 +417,10 @@ of pretending that Codex exposes pi's individual built-in tool names.
   makes its old evidence ineligible until the revised claim is verified again.
 - **Issue ledger.** Gaps open issues, verified records close them, a gap on a
   closed issue marks a regression. Exact claim ids identify the same gap across
-  loops. A blocker is mandatory in the next loop, as is a gap observed in two
+  loops. A later successful runtime check can also close its own existing
+  `check.<name>` issue when the command and retained execution evidence match;
+  this does not verify a product claim or change the QA verdict.
+  A blocker is mandatory in the next loop, as is a gap observed in two
   adjacent loops; these escalations appear before discretionary Planner work
   and at the top of the Developer document. Duplicate or replayed observations
   count only once. The Planner receives the bounded ledger view; mandatory and
@@ -198,11 +511,12 @@ receipt.json                canonical run-state hashes, identities, and historic
 ledger.json                 issue ledger
 claims.json                 fixed PRD claim catalog and required evidence types
 coverage.json               per-claim status, last verified loop, verification count
-claims-transcript.jsonl     model events from automatic claim drafting
+claims-transcript.jsonl     model events from optional claim drafting
 README.md                   generated development record
 iterations/loop-NN/
   planner.json              planner overlay + usage
   development_document.md   D_t (deterministic scaffold + overlay)
+  approval.json             optional human decision bound to the plan and protocol
   developer.json            candidate id, tree hash, commit, changed paths, violations
   checks.json               deterministic check results on the frozen candidate
   evidence.json             E_t
@@ -273,19 +587,22 @@ lists can be discovered from `GET {base_url}/models`. The root config uses
 | --- | --- |
 | `protocol` | `paper` fixes the initial harness/model/role/runtime contract and `T`; `extended` permits the product-specific overrides described below. Missing means legacy `extended` |
 | `harness` | `pi` (in-process SDK), `codex` (non-interactive Codex CLI), or `mock` (scripted dry run) |
+| `claim_catalog` | `existing` by default: use an existing catalog without generating one; `off`: ignore it; `generate`: draft when missing |
+| `human_checkpoint` | optional boolean, default false; `extended` only. Require approval before Developer via the foreground CLI or `runHoh`'s `approvePlan` callback |
 | `providers.<name>.base_url` | OpenAI-compatible endpoint (`…/v1`); may reference `$ENV` |
 | `providers.<name>.api_key` | `"$ENV_VAR"` or `"!command"`. Literal keys are accepted only for localhost endpoints, because the config is committed with the run record |
 | `providers.<name>.api` | `openai-completions` (default), `openai-responses`, or `anthropic-messages` |
 | `providers.<name>.models` | `"discover"` (fetch `GET {base_url}/models`, drop image/video/embedding/audio models) or an explicit list of ids / objects |
 | `providers.<name>.discover.exclude` / `include` | regex fragments applied to discovered ids |
 | `providers.<name>.model_defaults` / `model_overrides` | `reasoning`, `context_window`, `max_tokens`, `input`, `cost`, `compat` per model; overrides are keyed by model id |
+| `providers.<name>.model_overrides.<id>.thinking_level_map` | maps pi levels to provider effort values. Declare `{"xhigh":"xhigh","max":"max"}` for Luna so `:max` is preserved; `null` marks an unsupported level |
 | `providers.<name>.headers` / `compat` | extra headers (`$ENV` allowed) and pi compat flags (snake_case accepted) |
 | `models.default` | model pattern used by every role: pi uses `provider/model[:thinking]`; Codex accepts `codex/model[:minimal\|low\|medium\|high\|xhigh]` |
 | `models.planner` / `developer` / `tester` | per-role override for `extended`; under `paper`, every configured pattern must be identical and the receipt records its concrete resolution |
 | `loops` | iteration budget T |
 | `artifact_dir` | artifact directory inside the workspace (`.` = whole workspace minus `.hoh/`) |
 | `worktree_setup` | optional command run once per QA attempt in the isolated candidate worktree root before the checks (e.g. `cd tools && npm ci`), with the `HOH_*` check environment; recorded as check `setup`, whose failure blocks QA. It must not create or change non-ignored files in `artifact_dir`, or the candidate hash check invalidates QA |
-| `checks[]` | deterministic commands run on the frozen candidate before QA (`name`, `command`, optional `timeout_min`) |
+| `checks[]` | deterministic commands run on the frozen candidate before QA (`name`, `command`, optional `timeout_min`, and `claims` mapping stable IDs to the exact criteria tested). Only bound claims with every linked check passing can become verified |
 | `timeouts.role_min` / `check_min` | role and deterministic-check wall-clock limits |
 | `timeouts.provider_ms` | per-provider-request ceiling; pi SDK retries stay disabled so the same pi session owns retry classification |
 | `timeouts.output_idle_ms` / `websocket_connect_ms` | stream-silence watchdog and WebSocket handshake ceiling |
@@ -304,9 +621,15 @@ and repository instructions, supplies HoH's role prompt explicitly, disables
 interactive approval and web search, and maps `--json` plus `--output-schema`
 back into the common role result:
 
+The QA invocation grants write access to the current evidence directory outside
+the frozen worktree. Prompts and their snapshots use the CLI's final JSON schema
+contract. Requested model selection is retained in config and transcript, while
+reported model identity remains unavailable. `paper` is rejected before role
+execution until that identity can be checked independently.
+
 ```json
 {
-  "protocol": "paper",
+  "protocol": "extended",
   "harness": "codex",
   "models": { "default": "codex/gpt-5.6:high" },
   "loops": 3,
@@ -372,58 +695,81 @@ credentials and trusted specifications/tooling; HoH is not an environment-variab
 sandbox.
 `hoh config` re-runs discovery and prints the model list; when the endpoint is
 unreachable, the previously discovered list is reused.
-Every role record stores the model that was actually used, so `.hoh/README.md`
-shows which model produced each plan, candidate, and evidence bundle.
+Role records store the model identity reported by the harness. Missing identity,
+including Codex's, stays unavailable and is not filled with the requested model.
 
 ```bash
 node dist/cli.js config --workspace ../my-game   # effective config, per-role model resolution, credential check
 ```
 
-## Install and run
+## Experiment harness (library API)
 
-Use a dedicated, backed-up Git branch or workspace with no concurrent human
-edits. HoH creates commits and worktrees and reverts role writes that cross its
-runtime-record boundaries.
+The comparison harness for the paper's ablations is a library, not a CLI. It
+freezes an immutable plan covering all five conditions before any role runs:
+`hoh`, `vanilla`, `no-plan-update`, `no-evidence`, and `no-warm-start`.
 
-```bash
-npm install
-npm run build
+```ts
+import {
+  registerExperiment,
+  experimentAssignments,
+  runExperimentAttempt,
+  aggregateExperimentDirectory,
+} from "hoh/dist/experiment/orchestrator.js";
 
-# secrets: put the gateway key in .env (git-ignored) or export it
-echo 'SPBROS_API_KEY=…' > .env
-# (pi's built-in providers also work: `npx pi` → /login, or ANTHROPIC_API_KEY / OPENAI_API_KEY …)
+// 1. Seal the plan: samples, repeats, budget, evaluator identity, retry rules.
+const manifest = await registerExperiment({
+  experiment_root: "/tmp/exp",
+  samples: [{
+    task_id: "1945",
+    sample_id: "s1",
+    workspace: "/tmp/a0/1945",        // pristine A0, hashed into the plan
+    spec_path: "/tmp/a0/1945/PRD.md",
+    evaluator_task: "Score the artifact against the rubric.",
+    evaluator_sample: "1945 STRIKE",
+  }],
+  repetitions: 3,
+  assignment_seed: 20260903,
+  budget: { unit: "total_tokens", limit: 750_000 },
+  evaluator: {
+    argv: ["/usr/bin/node", "/opt/rubric/score.mjs"],   // executable + exact args, never a shell string
+    version: "1.0.0",
+    rubric_sha256: "…",
+    executable_sha256: "…",
+  },
+  metric: "overall",
+  exclusion_rules: ["infrastructure_failure"],
+  retry: { max_attempts: 2, retryable_failure_codes: ["transport"] },
+  harness,                              // from createHarness(config, workspace)
+  config,                               // the shared ConfigPatch
+});
 
-# edit hoh.config.json (providers, models, checks, artifact_dir), then:
-node dist/cli.js config --workspace ../my-game                     # verify models resolve and have credentials
-node dist/cli.js init-claims --workspace ../my-game --spec ./PRD.md # optional: draft and edit claims before running
-node dist/cli.js run    --workspace ../my-game --spec ./PRD.md     # run the budgeted loops
-node dist/cli.js status --workspace ../my-game
-node dist/cli.js verify --workspace ../my-game                     # offline receipt verification
+// 2. Execute each coordinate in a fresh copy of A0.
+for (const a of experimentAssignments(manifest)) {
+  await runExperimentAttempt({
+    experiment_root: "/tmp/exp",
+    attempt_id: `${a.cell_id}-${a.sample_id}-${a.repetition}`,
+    ...a,
+    workspace: freshCopyOfA0(),
+    spec_path: "/tmp/a0/1945/PRD.md",
+    evaluator_task: "Score the artifact against the rubric.",
+    evaluator_sample: "1945 STRIKE",
+    harness,
+    config,
+  });
+}
+
+// 3. Seal the results: macro means with bootstrap 95% intervals.
+await aggregateExperimentDirectory("/tmp/exp");
 ```
 
-Re-running with the same workspace resumes after the last completed loop.
-For an `extended` run, `--loops <n>` may extend the budget. For a `paper` run,
-the initial token, cost, elapsed, and loop ceilings are part of the immutable
-receipt; start a new run in another workspace instead of raising them. A
-`budget_exhausted` result preserves the partial loop and starts no next role
-until the stored limits permit it. The ledger charges the `RoleUsage` returned
-by each completed role, including Pi's same-session retry totals. The harness
-contract exposes no usage for a call that throws, so such usage is explicitly
-recorded as unavailable and never estimated as zero. Accounting begins with
-the loop-1 Planner; the optional loop-0 claim-drafting extension runs before
-the budget ledger opens and is not included. If
-`claims.json` is absent, `run` asks the
-Planner model to draft it before loop 1 and commits it with the run record.
-The generated catalog is a draft: review its PRD coverage and `requires` fields
-before relying on the coverage total. The runtime enforces declared evidence
-requirements but cannot prove that the model included every requirement.
-
-A dry run without any model:
-
-```bash
-node dist/cli.js run --workspace /tmp/hoh-demo --spec examples/demo-PRD.md --config examples/mock.config.json
-node dist/cli.js status --workspace /tmp/hoh-demo
-```
+The experiment root accumulates `manifest.json`, `raw-results.jsonl`,
+`aggregate.json`, `complete.json`, `receipts/`, and `intents/`. Each attempt
+revalidates the sealed inputs, runs one condition in its own workspace, archives
+the exact candidate tree, and only then invokes the blind evaluator in a separate
+process with no inherited environment. Scores never enter development prompts.
+As the trust boundary above notes, a supplied rubric is not independent ground
+truth: performance claims still need an official benchmark or an independent
+human rubric.
 
 ## Tests
 
@@ -440,7 +786,10 @@ npm test
   elapsed/token/cost accounting, resume stability, and error-free exhaustion.
 - `codex-harness.test.ts`: exact non-interactive CLI flags, schema mapping,
   process-group cancellation, adapter versioning, native role-policy receipts,
-  config validation, and a complete paper-protocol loop through a fake CLI.
+  evidence-directory access, command capture, paper rejection without model
+  reporting, and a complete extended loop through a fake CLI.
+- `runtime-integrity.test.ts`: forged QA rejection, optional catalog modes,
+  shared failed-role restoration, and human approval/resume bindings.
 - `experiment-manifest.test.ts`: immutable five-condition plans, common budgets,
   evaluator identity, append-only outcomes, retry lineage, and validity rules.
 - `experiment-evaluator.test.ts`: neutralized serialized input, exact argv and

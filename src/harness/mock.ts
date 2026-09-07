@@ -8,12 +8,15 @@ import path from "node:path";
 import type { Role } from "../types.js";
 import type { Harness, RoleInvocation, RoleResult } from "./types.js";
 import { emptyUsage } from "./types.js";
+import { runCheck } from "../runtime/checks.js";
+import type { CheckResult, EvidenceExecution } from "../types.js";
 
 export interface MockApi {
   submit(tool: string, payload: unknown): void;
   write(relPath: string, content: string): Promise<void>;
   read(relPath: string): Promise<string | null>;
   exists(relPath: string): Promise<boolean>;
+  run(command: string): Promise<CheckResult>;
 }
 
 export type MockScript = (inv: RoleInvocation, api: MockApi) => Promise<string | void> | string | void;
@@ -33,7 +36,15 @@ export class MockHarness implements Harness {
     inv.signal?.throwIfAborted();
     this.calls.push({ role: inv.role, loopIndex: inv.loopIndex, prompt: inv.prompt, model: inv.model });
     const submissions: Record<string, unknown[]> = {};
+    const executions: EvidenceExecution[] = [];
     const api: MockApi = {
+      run: async (command) => {
+        if (!inv.evidenceDir) throw new Error("mock QA execution requires an evidence directory");
+        const result = await runCheck({ name: `mock-${executions.length + 1}`, command }, inv.cwd, inv.timeoutMs ?? 10_000, {},
+          { directory: inv.evidenceDir, category: "qa", basename: `mock-${executions.length + 1}` }, inv.signal);
+        if (result.execution) executions.push(result.execution);
+        return result;
+      },
       submit: (tool, payload) => {
         inv.signal?.throwIfAborted();
         (submissions[tool] ??= []).push(payload);
@@ -67,7 +78,7 @@ export class MockHarness implements Harness {
     inv.onTranscript?.(
       `${JSON.stringify({ ts: new Date().toISOString(), type: "mock_invocation", role: inv.role, loop: inv.loopIndex, systemPrompt: inv.systemPrompt, prompt: inv.prompt, finalText: text, submissions })}\n`,
     );
-    return { finalText: text, submissions, usage: emptyUsage(), turns: 1, model: inv.model ? `mock:${inv.model}` : "mock" };
+    return { finalText: text, submissions, usage: emptyUsage(), turns: 1, executions, model: inv.model ? `mock:${inv.model}` : "mock" };
   }
 }
 
@@ -114,19 +125,22 @@ export function createDemoMockHarness(): MockHarness {
       const hasMain = await api.exists("main.txt");
       const hasPlayerControl = await api.exists("player_control.txt");
       const hasResult = await api.exists("result_state.txt");
+      const mainCheck = hasMain ? await api.run("test -s main.txt") : null;
+      const playerCheck = hasPlayerControl ? await api.run("test -s player_control.txt") : null;
+      const resultCheck = hasResult ? await api.run("test -s result_state.txt") : null;
       const verified: Array<{ claim_id: string; claim: string; execution_records: Array<{ type: string; path: string; observation: string }> }> = [];
       if (hasMain) {
         verified.push({
           claim_id: "main_entry",
           claim: "The main-entry contract passes its scripted check.",
-          execution_records: [{ type: "check", path: "mock:file-exists:main.txt", observation: "scripted file check passed" }],
+          execution_records: [{ type: "check", path: mainCheck!.stdout_path!, observation: "scripted file check passed" }],
         });
       }
       if (hasPlayerControl) {
         verified.push({
           claim_id: "player_control",
           claim: "The player-control contract passes its scripted check.",
-          execution_records: [{ type: "check", path: "mock:file-exists:player_control.txt", observation: "scripted file check passed" }],
+          execution_records: [{ type: "check", path: playerCheck!.stdout_path!, observation: "scripted file check passed" }],
         });
       }
       const gaps = hasResult
@@ -145,7 +159,7 @@ export function createDemoMockHarness(): MockHarness {
         verified.push({
           claim_id: "result_state",
           claim: "The result-state contract passes its scripted check.",
-          execution_records: [{ type: "check", path: "mock:file-exists:result_state.txt", observation: "scripted file check passed" }],
+          execution_records: [{ type: "check", path: resultCheck!.stdout_path!, observation: "scripted file check passed" }],
         });
       }
       api.submit("submit_evidence", {

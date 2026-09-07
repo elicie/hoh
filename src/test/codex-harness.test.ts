@@ -1,14 +1,19 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
 import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
 import { Type } from "typebox";
 import { CodexHarness, detectCodexVersion } from "../harness/codex.js";
 import { createHarness } from "../harness/factory.js";
+import type { RoleInvocation } from "../harness/types.js";
 import { DEFAULT_CONFIG, mergeConfig, validateConfig } from "../runtime/config.js";
 import { runHoh } from "../runtime/loop.js";
 import { buildProtocolReceipt } from "../runtime/protocol.js";
+import { readJson, RunPaths } from "../runtime/state.js";
+import type { RolePromptSnapshot } from "../types.js";
+import { testerTools } from "../runtime/schemas.js";
 import { makeWorkspace } from "./helpers.js";
 
 const fixture = path.resolve("src/test/fixtures/fake-codex-cli.mjs");
@@ -58,7 +63,7 @@ test("codex adapter uses the isolated non-interactive contract and maps schema o
     ]);
     assert.deepEqual(result.usage, { input: 120, output: 30, cacheRead: 20, cacheWrite: 0, totalTokens: 150, cost: 0 });
     assert.equal(result.turns, 1);
-    assert.equal(result.model, "codex/gpt-fixture:high");
+    assert.equal(result.model, undefined);
     const invocation = JSON.parse(await readFile(record, "utf8"));
     assert.equal(invocation.prompt, "USER PROMPT SENTINEL");
     assert.ok(invocation.args.includes("--ephemeral"));
@@ -113,6 +118,41 @@ test("codex adapter propagates cancellation and kills the CLI process", async ()
   }
 });
 
+test("Codex QA grants the external evidence directory and captures real command files", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "hoh-codex-evidence-"));
+  try {
+    const cwd = path.join(directory, "candidate");
+    const evidenceDir = path.join(directory, "evidence");
+    const record = path.join(directory, "invocation.json");
+    await mkdir(cwd);
+    await mkdir(evidenceDir);
+    await writeFile(path.join(cwd, "input.txt"), "actual artifact output\n");
+    const harness = new CodexHarness({ executable: process.execPath, executableArgs: [fixture], env: {
+      FAKE_CODEX_RECORD: record, FAKE_CODEX_EXECUTE: "1", HOH_EVIDENCE_DIR: evidenceDir,
+    } });
+    const inv: RoleInvocation = {
+      role: "tester" as const, loopIndex: 1, cwd, evidenceDir,
+      systemPrompt: "Output contract: you MUST call the `submit_evidence` tool exactly once.",
+      prompt: "Inspect then call `submit_evidence`. Your previous attempt ended without calling `submit_evidence`. The runtime only accepts output delivered through that tool.",
+      tools: ["read", "bash", "grep", "find", "ls"], structuredTools: testerTools, model: "codex/gpt-fixture",
+    };
+    const prepared = harness.preparePrompts(inv);
+    assert.deepEqual(harness.preparePrompts({ ...inv, ...prepared }), prepared);
+    const result = await harness.invoke(inv);
+    const invocation = JSON.parse(await readFile(record, "utf8"));
+    assert.equal(invocation.args[invocation.args.indexOf("--add-dir") + 1], evidenceDir);
+    assert.equal(invocation.args[invocation.args.indexOf("--sandbox") + 1], "workspace-write");
+    assert.equal(invocation.prompt, prepared.prompt);
+    assert.ok(invocation.args.includes(`developer_instructions=${JSON.stringify(prepared.systemPrompt)}`));
+    assert.doesNotMatch(prepared.systemPrompt + prepared.prompt, /call(?:ing)? (?:the )?`submit_/i);
+    assert.equal(result.executions?.length, 1);
+    const execution = result.executions![0];
+    assert.equal(execution.exit_code, 0);
+    assert.match(execution.command, /test -s input.txt/);
+    assert.deepEqual(execution.files, [{ path: "qa/result.log", sha256: createHash("sha256").update("actual artifact output\n").digest("hex") }]);
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
 test("codex adapter records the exact CLI version", async () => {
   assert.equal(
     await detectCodexVersion({ executable: process.execPath, executableArgs: [fixture] }),
@@ -137,7 +177,7 @@ test("codex adapter rejects an outer tool policy it cannot faithfully map", asyn
   );
 });
 
-test("codex factory completes a paper loop and receipts its native sandbox policy", async () => {
+test("codex rejects paper without reported model identity and runs extended with its native policy", async () => {
   const { ws, spec, cleanup } = await makeWorkspace();
   try {
     const config = mergeConfig(DEFAULT_CONFIG, {
@@ -153,11 +193,13 @@ test("codex factory completes a paper loop and receipts its native sandbox polic
     assert.equal(harness.name, "codex");
     assert.equal(harness.version, "codex-cli fixture-1.0.0");
 
+    await assert.rejects(buildProtocolReceipt(config, harness, { legacyDefault: false, origin: "run_start" }), /cannot report its actual execution model/);
+    config.protocol = "extended";
     const receipt = await buildProtocolReceipt(config, harness, { legacyDefault: false, origin: "run_start" });
     assert.deepEqual(receipt.models, {
-      planner: "codex/gpt-fixture:high",
-      developer: "codex/gpt-fixture:high",
-      tester: "codex/gpt-fixture:high",
+      planner: null,
+      developer: null,
+      tester: null,
     });
     assert.deepEqual(receipt.role_contracts.planner.builtin_tools, ["codex-exec:read-only"]);
     assert.deepEqual(receipt.role_contracts.developer.builtin_tools, ["codex-exec:workspace-write"]);
@@ -167,8 +209,11 @@ test("codex factory completes a paper loop and receipts its native sandbox polic
     assert.equal(result.status, "completed");
     assert.equal(result.results.length, 1);
     assert.equal(result.run.protocol_receipt?.harness.name, "codex");
-    assert.equal(result.results[0].planner.usage.model, "codex/gpt-fixture:high");
-    assert.equal(result.results[0].evidence.usage.model, "codex/gpt-fixture:high");
+    assert.equal(result.results[0].planner.usage.model, undefined);
+    assert.equal(result.results[0].evidence.usage.model, undefined);
+    const snapshot = (await readJson<RolePromptSnapshot>(new RunPaths(ws).promptSnapshot(1, "tester")))!;
+    assert.match(snapshot.system_prompt, /final JSON object/);
+    assert.doesNotMatch(snapshot.system_prompt + snapshot.user_prompt, /call(?:ing)? `submit_/i);
   } finally {
     await cleanup();
   }

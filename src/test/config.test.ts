@@ -188,28 +188,13 @@ test("config: per-role models reach the harness and the run record; stored confi
     assert.equal(await readFile(paths.config, "utf8"), configBeforeArtifactDirChange);
     assert.equal(await readFile(paths.runJson, "utf8"), runBeforeArtifactDirChange);
 
-    // A pre-receipt run migrates forward as legacy extended, never as paper.
-    const legacyRun = (await readJson<RunConfig>(paths.runJson))! as RunConfig & { protocol_receipt?: unknown };
-    const legacyConfig = (await readJson<HohConfig>(paths.config))! as HohConfig & { protocol?: unknown };
-    delete legacyRun.protocol_receipt;
-    delete (legacyRun.config as Partial<HohConfig>).protocol;
-    delete (legacyConfig as Partial<HohConfig>).protocol;
-    await writeFile(paths.runJson, `${JSON.stringify(legacyRun, null, 2)}\n`);
-    await writeFile(paths.config, `${JSON.stringify(legacyConfig, null, 2)}\n`);
-    await assert.rejects(
-      runHoh({
-        workspace: ws,
-        harness,
-        config: { protocol: "paper", models: { default: "m/shared", planner: "m/shared", developer: "m/shared", tester: "m/shared" } },
-      }),
-      /cannot change run protocol from extended to paper/,
-    );
-    const migrated = await runHoh({ workspace: ws, harness });
-    assert.equal(migrated.results.length, 0);
-    assert.equal(migrated.run.protocol_receipt?.mode, "extended");
-    assert.equal(migrated.run.protocol_receipt?.legacy_default, true);
-    assert.equal(migrated.run.protocol_receipt?.origin, "legacy_reconstruction");
+    // Removing protocol fields from a receipted run is tampering, not migration.
+    const alteredRun = (await readJson<RunConfig>(paths.runJson))!;
+    delete alteredRun.protocol_receipt;
+    await writeFile(paths.runJson, `${JSON.stringify(alteredRun, null, 2)}\n`);
+    await assert.rejects(runHoh({ workspace: ws, harness }), /run receipt verification failed/);
 
+    await writeFile(paths.runJson, runBeforeArtifactDirChange);
     // A harness that does not match the configured one is refused.
     await assert.rejects(runHoh({ workspace: ws, harness: { name: "pi", invoke: async () => ({ finalText: "", submissions: {}, usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: 0 }, turns: 0 }) } }), /configured harness is "mock"/);
   } finally {
@@ -286,7 +271,7 @@ test("config: paper protocol receipt locks models, role contracts, runtime polic
     tamperedRun.protocol_receipt!.models.planner = "mock:tampered";
     const tamperedText = `${JSON.stringify(tamperedRun, null, 2)}\n`;
     await writeFile(paths.runJson, tamperedText);
-    await assert.rejects(runHoh({ workspace: ws, harness }), /stored protocol receipt failed its integrity check/);
+    await assert.rejects(runHoh({ workspace: ws, harness }), /run receipt verification failed/);
     assert.equal(await readFile(paths.runJson, "utf8"), tamperedText, "an invalid receipt must not be rewritten");
   } finally {
     await cleanup();
@@ -395,4 +380,24 @@ test("providers: the generated pi models file is stable across invocations", asy
     await server.close();
     await rm(dir, { recursive: true, force: true });
   }
+});
+
+
+test("config: a genuine pre-receipt run migrates to extended with a verified checkpoint", async () => {
+  const { ws, spec, cleanup } = await makeWorkspace();
+  try {
+    const paths = new RunPaths(ws);
+    const config: Partial<HohConfig> = mergeConfig(DEFAULT_CONFIG, { harness: "mock", loops: 1 });
+    delete config.protocol;
+    await writeFile(paths.spec, await readFile(spec));
+    await writeFile(paths.config, JSON.stringify(config));
+    await writeFile(paths.runJson, JSON.stringify({ schema_version: 1, run_id: "legacy", spec_path: paths.rel(paths.spec), created_at: new Date().toISOString(), config }));
+    await writeFile(paths.ledger, JSON.stringify({ schema_version: 1, issues: {} }));
+    const migrated = await runHoh({ workspace: ws, harness: createDemoMockHarness() });
+    assert.equal(migrated.run.protocol_receipt?.mode, "extended");
+    assert.equal(migrated.run.protocol_receipt?.origin, "legacy_reconstruction");
+    assert.equal(migrated.run.protocol_receipt?.legacy_default, true);
+    const { verifyCurrentRunReceipt } = await import("../runtime/run-receipt.js");
+    assert.equal((await verifyCurrentRunReceipt(ws)).ok, true);
+  } finally { await cleanup(); }
 });

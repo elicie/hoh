@@ -18,7 +18,7 @@ import { gitLog } from "../runtime/git.js";
 import { runHoh } from "../runtime/loop.js";
 import { readJson, RunPaths } from "../runtime/state.js";
 import type { ClaimRecord, CoverageState, EvidenceBundle } from "../types.js";
-import { DEMO_CLAIMS, DEMO_SPEC, makeWorkspace } from "./helpers.js";
+import { DEMO_CHECKS, DEMO_CLAIMS, DEMO_SPEC, makeWorkspace } from "./helpers.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -105,7 +105,7 @@ test("coverage: two-loop run updates files, prompts, README, and status", async 
   const { ws, spec, cleanup } = await makeWorkspace();
   try {
     const harness = createDemoMockHarness();
-    await runHoh({ workspace: ws, specPath: spec, harness, config: { harness: "mock", loops: 2 } });
+    await runHoh({ workspace: ws, specPath: spec, harness, config: { harness: "mock", loops: 2, checks: DEMO_CHECKS } });
     const paths = new RunPaths(ws);
     const coverage = (await readJson<CoverageState>(paths.coverage))!;
     assert.deepEqual(coverageSummary(makeClaimCatalog(DEMO_SPEC, DEMO_CLAIMS), coverage), { verified: 3, gap: 0, untested: 0, all: 3 });
@@ -151,13 +151,13 @@ test("init-claims CLI drafts an editable catalog without starting a run", async 
   }
 });
 
-test("run automatically drafts missing fixed claims before the first planner loop", async () => {
+test("explicit generation drafts missing fixed claims before the first planner loop", async () => {
   const { ws, spec, cleanup } = await makeWorkspace();
   try {
     const paths = new RunPaths(ws);
     await rm(paths.claims);
     const harness = createDemoMockHarness();
-    await runHoh({ workspace: ws, specPath: spec, harness, config: { harness: "mock", loops: 1 } });
+    await runHoh({ workspace: ws, specPath: spec, harness, config: { harness: "mock", loops: 1, claim_catalog: "generate", checks: DEMO_CHECKS } });
 
     assert.equal(harness.calls[0].role, "planner");
     assert.equal(harness.calls[0].loopIndex, 0);
